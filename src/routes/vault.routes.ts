@@ -5,7 +5,8 @@ import {
   getVaultServiceDetail, 
   getCommonDocuments, 
   uploadDocument, 
-  uploadCommonDocument 
+  uploadCommonDocument,
+  syncUserCommonDocs,
 } from '../controllers/client_controllers/vault.controller';
 import { getCommonDocumentSignedUrl } from '../controllers/client_controllers/documents.controller';
 import { authMiddleware } from '../middlewares/auth.middleware';
@@ -21,6 +22,9 @@ router.use(authMiddleware);
 // Upload routes (with multer)
 router.post('/upload', upload.single('file'), uploadDocument);
 router.post('/common-upload', upload.single('file'), uploadCommonDocument);
+
+// Backfill sync — propagates existing common docs to all active service docs
+router.post('/sync', syncUserCommonDocs);
 
 // Data routes
 router.get('/groups', getVaultGroups);

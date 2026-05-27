@@ -3,6 +3,7 @@ import { isStaffRole, UserRole } from '../../shared/roles';
 import { getFYFromDate } from '../../shared/fy-utils';
 import { logServiceEvent } from '../../utils/operations';
 import { canAccessClientServiceRecord } from '../../utils/service-access';
+import { mirrorServiceDocToCommon, propagateCommonDocToServices, prefillServiceDocsFromCommon } from '../../utils/doc-sync';
 
 export const getVaultGroups = async (req: Request, res: Response) => {
   try {
@@ -288,6 +289,18 @@ export const uploadDocument = async (req: Request, res: Response) => {
 
     if (updateErr) return res.status(500).json({ error: updateErr.message });
 
+    // ── Bidirectional sync: if this doc is a known common type, mirror it to
+    // common_documents and propagate to other active service docs for this user.
+    const uploadedAt = new Date().toISOString();
+    mirrorServiceDocToCommon(
+      req.supabase,
+      cs.user_id,
+      documentName,
+      filePath,
+      uploadedAt,
+      pan,
+    ).catch(console.error);
+
     // Auto-advance
     const { data: allDocs } = await req.supabase.from('client_documents').select('status').eq('client_service_id', serviceId);
     const allUploaded = allDocs && allDocs.length > 0 &&
@@ -362,9 +375,60 @@ export const uploadCommonDocument = async (req: Request, res: Response) => {
 
     if (dbErr) return res.status(500).json({ error: dbErr.message });
 
+    // ── Bidirectional sync: propagate this common doc to all pending service docs
+    // for the user that match the same document type, so they don't have to upload again.
+    const syncUploadedAt = new Date().toISOString();
+    propagateCommonDocToServices(
+      req.supabase,
+      req.user.id,
+      documentType,
+      filePath,
+      syncUploadedAt,
+    ).catch(console.error);
+
     res.json({ storedFilename, filePath, status: 'uploaded' });
   } catch (error) {
     console.error('uploadCommonDocument error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+/**
+ * POST /vault/sync
+ *
+ * Backfill sync — runs prefillServiceDocsFromCommon for ALL active services of
+ * the authenticated user. This is called automatically when the Vault page loads
+ * so that any common docs uploaded before the sync system was introduced are
+ * propagated into existing pending service-doc rows immediately.
+ *
+ * It is intentionally idempotent: uploading a doc that is already 'uploaded'
+ * or 'approved' is never touched (the prefill only targets 'pending' rows).
+ */
+export const syncUserCommonDocs = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Fetch all active (non-completed, non-cancelled) services for this user
+    const { data: activeServices, error } = await req.supabase
+      .from('client_services')
+      .select('id')
+      .eq('user_id', req.user.id)
+      .not('status', 'in', '(completed,cancelled)');
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!activeServices?.length) return res.json({ synced: 0 });
+
+    // Run prefill concurrently across all active services
+    await Promise.all(
+      activeServices.map((svc: any) =>
+        prefillServiceDocsFromCommon(req.supabase!, req.user!.id, svc.id)
+      )
+    );
+
+    res.json({ synced: activeServices.length });
+  } catch (error) {
+    console.error('syncUserCommonDocs error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+

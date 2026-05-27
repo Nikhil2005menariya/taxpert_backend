@@ -3,6 +3,7 @@ import { createServiceClient } from '../../configs/supabase.config';
 import { currentFY } from '../../shared/fy-utils';
 import { autoAssignTaxpert } from '../../utils/auto-assign';
 import { emailQueue } from '../../queues/email.queue';
+import { prefillServiceDocsFromCommon } from '../../utils/doc-sync';
 
 export const checkServiceExists = async (req: Request, res: Response) => {
   try {
@@ -120,6 +121,10 @@ export const assignService = async (req: Request, res: Response) => {
         await req.supabase.from('client_documents').insert(docs);
       }
     }
+
+    // Pre-fill any service docs that the user has already uploaded as common docs
+    // so they don't have to re-upload PAN/Aadhaar/DSC etc. for every new service.
+    prefillServiceDocsFromCommon(req.supabase, req.user.id, cs.id).catch(console.error);
 
     // Log event
     serviceClient.from('service_events').insert({
