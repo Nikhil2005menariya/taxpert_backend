@@ -10,6 +10,7 @@ import {
   toggleServiceActive,
   getDocumentTypes,
   upsertDocumentType,
+  patchDocumentType,
   getServiceDocumentRequirements,
   addDocumentRequirement,
   updateDocumentRequirement,
@@ -40,6 +41,7 @@ router.patch('/services/:id/toggle', toggleServiceActive);
 // Document Types
 router.get('/document-types', getDocumentTypes);
 router.post('/document-types', upsertDocumentType);
+router.patch('/document-types/:id', patchDocumentType);
 
 // Service Document Requirements
 router.get('/services/:serviceId/requirements', getServiceDocumentRequirements);

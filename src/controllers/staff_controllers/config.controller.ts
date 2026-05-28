@@ -215,11 +215,13 @@ export const upsertDocumentType = async (req: Request, res: Response) => {
   try {
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    if (profile?.role !== 'super_admin') return res.status(403).json({ error: 'Forbidden' });
+    if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
 
     const input = req.body;
+    const code = input.code.trim().toUpperCase().replace(/\s+/g, '_');
     const payload = {
-      code: input.code.trim().toUpperCase().replace(/\s+/g, '_'),
+      code,
+      slug: code.toLowerCase().replace(/_/g, '-'),
       name: input.name.trim(),
       description: input.description ?? null,
       is_common_document: input.is_common_document ?? false,
@@ -228,17 +230,48 @@ export const upsertDocumentType = async (req: Request, res: Response) => {
       is_active: input.is_active ?? true,
     };
 
+    const svc = createServiceClient();
     let result;
     if (input.id) {
-      result = await req.supabase.from('document_types').update(payload).eq('id', input.id).select().single();
+      result = await svc.from('document_types').update(payload).eq('id', input.id).select().single();
     } else {
-      result = await req.supabase.from('document_types').insert(payload).select().single();
+      result = await svc.from('document_types').insert(payload).select().single();
     }
 
     if (result.error) return res.status(400).json({ error: result.error.message });
     res.json({ data: result.data });
   } catch (error) {
     console.error('upsertDocumentType error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const patchDocumentType = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
+    if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
+
+    const { id } = req.params;
+    const { name, description, is_common_document, is_active, allowed_extensions, max_file_size_mb } = req.body;
+
+    const payload: Record<string, unknown> = {};
+    if (name !== undefined) payload.name = name.trim();
+    if (description !== undefined) payload.description = description ?? null;
+    if (is_common_document !== undefined) payload.is_common_document = is_common_document;
+    if (is_active !== undefined) payload.is_active = is_active;
+    if (allowed_extensions !== undefined) payload.allowed_extensions = allowed_extensions;
+    if (max_file_size_mb !== undefined) payload.max_file_size_mb = max_file_size_mb;
+
+    if (Object.keys(payload).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+    // Use service client to bypass RLS — admin auth is already verified above.
+    const svc = createServiceClient();
+    const { data, error } = await svc.from('document_types').update(payload).eq('id', id).select().single();
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ data });
+  } catch (error) {
+    console.error('patchDocumentType error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

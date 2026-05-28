@@ -14,6 +14,7 @@ import couponsRoutes from './coupons.routes';
 import adminRoutes from './admin.routes';
 import configRoutes from './config.routes';
 import remindersRoutes from './reminders.routes';
+import texpertRoutes from './texpert.routes';
 
 const router = Router();
 
@@ -31,5 +32,6 @@ router.use('/coupons', couponsRoutes);
 router.use('/admin', adminRoutes);
 router.use('/config', configRoutes);
 router.use('/reminders', remindersRoutes);
+router.use('/texpert', texpertRoutes);
 
 export default router;

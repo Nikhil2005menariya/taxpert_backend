@@ -327,3 +327,159 @@ export async function sendDocumentStatusEmail({
     `,
   });
 }
+
+// ── Phase 2 email templates ───────────────────────────────────
+
+const BASE_URL = process.env.APP_URL ?? 'https://thetaxpert.com';
+
+function emailShell(body: string) {
+  return `
+    <div style="font-family:sans-serif;max-width:540px;margin:0 auto;color:#1a1a2e">
+      ${body}
+      <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
+      <p style="font-size:12px;color:#999">TheTaxpert &middot; Tax &amp; Compliance Services</p>
+    </div>
+  `;
+}
+
+function goldButton(href: string, label: string) {
+  return `<p><a href="${href}" style="display:inline-block;background:#c49a3a;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">${label} &rarr;</a></p>`;
+}
+
+export async function sendTexpertAssignedEmail({
+  clientEmail, clientFirstName,
+  texpertEmail, texpertFirstName,
+  serviceName, fiscalYear,
+}: {
+  clientEmail: string;  clientFirstName: string;
+  texpertEmail: string; texpertFirstName: string;
+  serviceName: string;  fiscalYear?: string | null;
+}) {
+  if (!resend) return;
+  const fy = fiscalYear ? ` (${fiscalYear})` : '';
+
+  await Promise.all([
+    resend.emails.send({
+      from: FROM, to: clientEmail,
+      subject: `Your Taxpert has been assigned — ${serviceName}${fy}`,
+      html: emailShell(`
+        <p style="font-size:16px">Hi ${clientFirstName},</p>
+        <p>Good news! A Taxpert has been assigned to your <strong>${serviceName}${fy}</strong> service.</p>
+        <p>Your Taxpert <strong>${texpertFirstName}</strong> will review your case and reach out if anything is needed.</p>
+        ${goldButton(`${BASE_URL}/dashboard/services`, 'View Service')}
+      `),
+    }),
+    resend.emails.send({
+      from: FROM, to: texpertEmail,
+      subject: `New service assigned to you — ${serviceName}${fy}`,
+      html: emailShell(`
+        <p style="font-size:16px">Hi ${texpertFirstName},</p>
+        <p>A new service has been assigned to you: <strong>${serviceName}${fy}</strong>.</p>
+        <p>Please log in to review the client's documents and get started.</p>
+        ${goldButton(`${BASE_URL}/dashboard/texpert/services`, 'View Assigned Services')}
+      `),
+    }),
+  ]);
+}
+
+export async function sendReuploadRequestEmail({
+  to, firstName, serviceName, documentName, note,
+}: {
+  to: string; firstName: string; serviceName: string; documentName: string; note?: string | null;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Action required: re-upload needed for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your Taxpert has requested a re-upload of the following document for <strong>${serviceName}</strong>:</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0">
+        <strong>${documentName}</strong>
+        ${note ? `<p style="margin:8px 0 0;font-size:14px;color:#555">${note}</p>` : ''}
+      </div>
+      ${goldButton(`${BASE_URL}/dashboard/vault`, 'Go to Vault')}
+    `),
+  });
+}
+
+export async function sendAdditionalDocAddedEmail({
+  to, firstName, serviceName, docName,
+}: {
+  to: string; firstName: string; serviceName: string; docName: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `New document requested for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your Taxpert has added a new document slot to your <strong>${serviceName}</strong> service:</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0">
+        <strong>${docName}</strong>
+      </div>
+      <p>Please upload this document in your Vault to help your Taxpert proceed.</p>
+      ${goldButton(`${BASE_URL}/dashboard/vault`, 'Upload Now')}
+    `),
+  });
+}
+
+export async function sendTexpertCredentialsEmail({
+  to, firstName, email, password,
+}: {
+  to: string; firstName: string; email: string; password: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: 'Your TheTaxpert Taxpert account is ready',
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your Taxpert account on TheTaxpert has been created. Here are your login credentials:</p>
+      <div style="background:#f9f5ec;border:1px dashed #c49a3a;border-radius:10px;padding:20px 24px;margin:20px 0">
+        <p style="margin:0 0 6px;font-size:13px;color:#888">EMAIL</p>
+        <p style="margin:0 0 16px;font-weight:700">${email}</p>
+        <p style="margin:0 0 6px;font-size:13px;color:#888">TEMPORARY PASSWORD</p>
+        <p style="margin:0;font-weight:700;letter-spacing:.05em">${password}</p>
+      </div>
+      <p style="color:#b64545;font-size:13px">Please change your password after first login.</p>
+      ${goldButton(`${BASE_URL}/login`, 'Login Now')}
+    `),
+  });
+}
+
+export async function sendPayoutRecordedEmail({
+  to, firstName, serviceName, amountPaise, notes,
+}: {
+  to: string; firstName: string; serviceName: string; amountPaise: number; notes?: string | null;
+}) {
+  if (!resend) return;
+  const rupees = (amountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Payout recorded — ₹${rupees} for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>A payout has been recorded for your completed service.</p>
+      <div style="background:#f9f5ec;border-left:3px solid #2f7a5b;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:13px;color:#888">SERVICE</p>
+        <p style="margin:0 0 12px;font-weight:700">${serviceName}</p>
+        <p style="margin:0 0 4px;font-size:13px;color:#888">AMOUNT</p>
+        <p style="margin:0;font-size:22px;font-weight:700;color:#2f7a5b">₹${rupees}</p>
+      </div>
+      ${notes ? `<p style="font-size:14px;color:#555">Note: ${notes}</p>` : ''}
+    `),
+  });
+}
+
+export async function sendManualNotificationEmail({
+  to, subject, body,
+}: {
+  to: string; subject: string; body: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to, subject,
+    html: emailShell(`<p style="font-size:15px;line-height:1.6">${body}</p>`),
+  });
+}
