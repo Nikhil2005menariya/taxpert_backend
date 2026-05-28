@@ -7,7 +7,7 @@ import {
   removeServiceDirect, 
   requestServiceDeletion, 
   cancelDeletionRequest 
-} from '../controllers/client_controllers/client-services.controller';
+} from '../../controllers/client_controllers/client-services.controller';
 import { 
   getOpsServices, 
   getAllClientServices, 
@@ -16,8 +16,8 @@ import {
   updateServiceStatus, 
   approveServiceDeletion, 
   rejectServiceDeletion 
-} from '../controllers/staff_controllers/ops.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/staff_controllers/ops.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);

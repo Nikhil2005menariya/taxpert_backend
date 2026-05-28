@@ -3,7 +3,7 @@ import {
   getMarketingCategories,
   getMarketingCategoryBySlug,
   getMarketingServiceBySlug,
-} from '../controllers/public_controllers/marketing.controller';
+} from '../../controllers/public_controllers/marketing.controller';
 
 const router = Router();
 

@@ -7,8 +7,8 @@ import {
   addDocSlot,
   getOpenQueue,
   claimFromQueue,
-} from '../controllers/staff_controllers/texpert.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/staff_controllers/texpert.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);

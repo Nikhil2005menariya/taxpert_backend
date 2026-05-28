@@ -7,9 +7,9 @@ import {
   uploadDocument, 
   uploadCommonDocument,
   syncUserCommonDocs,
-} from '../controllers/client_controllers/vault.controller';
-import { getCommonDocumentSignedUrl } from '../controllers/client_controllers/documents.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/client_controllers/vault.controller';
+import { getCommonDocumentSignedUrl } from '../../controllers/client_controllers/documents.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const upload = multer({ 
   storage: multer.memoryStorage(), 

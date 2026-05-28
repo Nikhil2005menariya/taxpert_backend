@@ -20,8 +20,8 @@ import {
   removeDueDateTemplate,
   computeDueDatesFromDB,
   getRequiredDocTypesForService
-} from '../controllers/staff_controllers/config.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/staff_controllers/config.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);

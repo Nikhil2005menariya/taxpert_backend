@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { getServices, getServicePriceBySlug, getServiceDocumentTemplates } from '../controllers/public_controllers/services.controller';
-import { checkServiceExists, assignService } from '../controllers/client_controllers/services.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
-import { globalLimiter } from '../middlewares/rate-limit.middleware';
+import { getServices, getServicePriceBySlug, getServiceDocumentTemplates } from '../../controllers/public_controllers/services.controller';
+import { checkServiceExists, assignService } from '../../controllers/client_controllers/services.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
+import { globalLimiter } from '../../middlewares/rate-limit.middleware';
 
 const router = Router();
 

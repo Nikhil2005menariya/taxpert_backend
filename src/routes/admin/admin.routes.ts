@@ -15,22 +15,22 @@ import {
   getUserPermissionOverrides,
   updateUserPermissionOverrides,
   getPermissionAuditLog
-} from '../controllers/staff_controllers/admin.controller';
+} from '../../controllers/staff_controllers/admin.controller';
 
 // Phase 2 controllers
-import { listTaxperts, createTaxpert, getTaxpertDetail, updateTaxpert, deactivateTaxpert, removeTaxpert } from '../controllers/admin_controllers/taxperts.controller';
+import { listTaxperts, createTaxpert, getTaxpertDetail, updateTaxpert, deactivateTaxpert, removeTaxpert } from '../../controllers/admin_controllers/taxperts.controller';
 import {
   listClients, getClientDetail, getClientServices,
   getAdminServiceDetail, adminUpdateService, adminUpdateDocStatus,
   adminAddTask, adminUpdateTask, adminDeleteTask,
   adminLogEvent, adminAddDocSlot, adminRecordPayoutForService,
-} from '../controllers/admin_controllers/clients.controller';
-import { getQueue, assignTexpert, unassignTexpert, addToQueue } from '../controllers/admin_controllers/assignments.controller';
-import { listPayouts, recordPayout, getTexpertPayouts } from '../controllers/admin_controllers/payouts.controller';
-import { sendNotification, getNotificationHistory } from '../controllers/admin_controllers/notifications.controller';
-import { getAuditLog } from '../controllers/admin_controllers/audit.controller';
+} from '../../controllers/admin_controllers/clients.controller';
+import { getQueue, assignTexpert, unassignTexpert, addToQueue } from '../../controllers/admin_controllers/assignments.controller';
+import { listPayouts, recordPayout, getTexpertPayouts } from '../../controllers/admin_controllers/payouts.controller';
+import { sendNotification, getNotificationHistory } from '../../controllers/admin_controllers/notifications.controller';
+import { getAuditLog } from '../../controllers/admin_controllers/audit.controller';
 
-import { authMiddleware } from '../middlewares/auth.middleware';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);

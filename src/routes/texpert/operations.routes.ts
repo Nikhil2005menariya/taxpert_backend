@@ -5,8 +5,8 @@ import {
   getTaskInbox, 
   updateServiceTaskStatus, 
   getDashboardWorkload 
-} from '../controllers/staff_controllers/workspace.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/staff_controllers/workspace.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);

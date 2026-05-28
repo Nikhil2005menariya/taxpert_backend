@@ -3,8 +3,8 @@ import {
   sendManualReminder,
   getLastReminder,
   getPendingDocumentClients
-} from '../controllers/staff_controllers/reminders.controller';
-import { authMiddleware } from '../middlewares/auth.middleware';
+} from '../../controllers/staff_controllers/reminders.controller';
+import { authMiddleware } from '../../middlewares/auth.middleware';
 
 const router = Router();
 router.use(authMiddleware);
