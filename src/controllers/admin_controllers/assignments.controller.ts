@@ -3,6 +3,7 @@ import { createServiceClient } from '../../configs/supabase.config';
 import { isAdminRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
+import { emailQueue } from '../../queues/email.queue';
 
 async function assertAdmin(req: Request, res: Response): Promise<boolean> {
   if (!req.user || !req.supabase) { res.status(401).json({ error: 'Unauthorized' }); return false; }
@@ -105,7 +106,36 @@ export const assignTexpert = async (req: Request, res: Response) => {
       metadata:   { texpertId },
     });
 
-    // TODO: queue email to client and texpert notifying assignment
+    // Queue texpert-assigned email (template sends to BOTH client and texpert)
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('user_id, service_id, fiscal_year')
+        .eq('id', clientServiceId)
+        .single();
+      if (cs) {
+        const [{ data: client }, { data: svc }, { data: texpertProfile }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+          service.from('services').select('name').eq('id', cs.service_id).single(),
+          service.from('users').select('email, first_name').eq('id', texpertId).single(),
+        ]);
+        if (client?.email && texpertProfile?.email) {
+          emailQueue.add('texpert-assigned', {
+            type: 'texpert-assigned',
+            payload: {
+              clientEmail:       client.email,
+              clientFirstName:   client.first_name,
+              texpertEmail:      texpertProfile.email,
+              texpertFirstName:  texpertProfile.first_name,
+              serviceName:       svc?.name ?? 'your service',
+              fiscalYear:        cs.fiscal_year ?? null,
+            },
+          }).catch(e => appLogger.warn('texpert-assigned enqueue failed', { err: e.message }));
+        }
+      }
+    } catch (e) {
+      appLogger.warn('assignTexpert email lookup failed', { err: (e as Error).message });
+    }
 
     res.json({ success: true });
   } catch (err) {

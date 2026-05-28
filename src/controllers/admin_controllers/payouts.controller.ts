@@ -3,6 +3,7 @@ import { createServiceClient } from '../../configs/supabase.config';
 import { isAdminRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
+import { emailQueue } from '../../queues/email.queue';
 
 async function assertAdmin(req: Request, res: Response): Promise<boolean> {
   if (!req.user || !req.supabase) { res.status(401).json({ error: 'Unauthorized' }); return false; }
@@ -65,7 +66,7 @@ export const recordPayout = async (req: Request, res: Response) => {
     // Verify taxpert
     const { data: texpert } = await service
       .from('users')
-      .select('id')
+      .select('id, first_name, email')
       .eq('id', texpertId)
       .in('role', ['expert', 'ca'])
       .single();
@@ -93,7 +94,31 @@ export const recordPayout = async (req: Request, res: Response) => {
       metadata:   { amount, clientServiceId, payoutId: data.id },
     });
 
-    // TODO: queue payout confirmation email to texpert
+    // Email texpert about the payout
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('service_id')
+        .eq('id', clientServiceId)
+        .single();
+      const { data: svc } = cs
+        ? await service.from('services').select('name').eq('id', cs.service_id).single()
+        : { data: null };
+      if (texpert.email) {
+        emailQueue.add('payout-recorded', {
+          type: 'payout-recorded',
+          payload: {
+            to:          texpert.email,
+            firstName:   texpert.first_name,
+            serviceName: svc?.name ?? 'a service',
+            amountPaise: amount,
+            notes:       notes ?? null,
+          },
+        }).catch(e => appLogger.warn('payout-recorded enqueue failed', { err: e.message }));
+      }
+    } catch (e) {
+      appLogger.warn('recordPayout email lookup failed', { err: (e as Error).message });
+    }
 
     res.json({ success: true, payoutId: data.id });
   } catch (err) {

@@ -292,6 +292,7 @@ export async function sendDocumentStatusEmail({
   status,
   notes,
   vaultLink,
+  final,
 }: {
   to: string;
   firstName: string;
@@ -299,10 +300,12 @@ export async function sendDocumentStatusEmail({
   status: "approved" | "rejected";
   notes?: string;
   vaultLink?: string;
+  final?: boolean; // If rejected with final=true, no re-upload CTA
 }) {
   if (!resend) return;
   const isApproved = status === "approved";
   const uploadUrl = vaultLink ?? "https://thetaxpert.com/vault";
+  const showReuploadCta = !isApproved && !final;
   await resend.emails.send({
     from: FROM,
     to,
@@ -314,14 +317,15 @@ export async function sendDocumentStatusEmail({
           Your document <strong>${documentName}</strong> has been
           <strong style="color:${isApproved ? "#2f7a5b" : "#b64545"}">${isApproved ? "approved ✓" : "rejected ✕"}</strong>.
         </p>
-        ${notes ? `<p style="background:#f5f5f0;padding:12px 16px;border-radius:8px;font-size:14px">Note: ${notes}</p>` : ""}
-        ${!isApproved ? `
+        ${notes ? `<p style="background:#f5f5f0;padding:12px 16px;border-radius:8px;font-size:14px">Note from your Taxpert: ${notes}</p>` : ""}
+        ${showReuploadCta ? `
         <p>
           <a href="${uploadUrl}"
              style="display:inline-block;background:#c49a3a;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">
             Re-upload Document →
           </a>
         </p>` : ""}
+        ${!isApproved && final ? `<p style="font-size:13px;color:#666">If you believe this is a mistake, reply to this email or contact <a href="mailto:info@thetaxpert.com">info@thetaxpert.com</a>.</p>` : ""}
         <p style="font-size:12px;color:#999">TheTaxpert · Tax &amp; Compliance Services</p>
       </div>
     `,

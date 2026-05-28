@@ -3,6 +3,13 @@ import { createServiceClient } from '../../configs/supabase.config';
 import { isAdminRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
+import { emailQueue } from '../../queues/email.queue';
+
+// Helper: enqueue an email and never throw to the caller
+function enqueueEmail(type: string, payload: Record<string, unknown>) {
+  emailQueue.add(type, { type, payload })
+    .catch(e => appLogger.warn(`${type} enqueue failed`, { err: e.message }));
+}
 
 async function assertAdmin(req: Request, res: Response): Promise<boolean> {
   if (!req.user || !req.supabase) { res.status(401).json({ error: 'Unauthorized' }); return false; }
@@ -252,6 +259,31 @@ export const adminUpdateService = async (req: Request, res: Response) => {
         message:           `Status updated to ${status} by admin`,
         metadata:          { status, notes },
       });
+
+      // Email client about status change
+      try {
+        const { data: cs } = await service
+          .from('client_services')
+          .select('user_id, service_id')
+          .eq('id', id)
+          .single();
+        if (cs) {
+          const [{ data: client }, { data: svc }] = await Promise.all([
+            service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+            service.from('services').select('name').eq('id', cs.service_id).single(),
+          ]);
+          if (client?.email) {
+            enqueueEmail('workflow-status', {
+              to:          client.email,
+              firstName:   client.first_name,
+              serviceName: svc?.name ?? 'your service',
+              status,
+            });
+          }
+        }
+      } catch (e) {
+        appLogger.warn('adminUpdateService email lookup failed', { err: (e as Error).message });
+      }
     }
 
     await writeAudit({
@@ -402,6 +434,31 @@ export const adminAddDocSlot = async (req: Request, res: Response) => {
       metadata:          { doc_id: data.id },
     });
 
+    // Email client (same template texpert uses)
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('user_id, service_id')
+        .eq('id', id)
+        .single();
+      if (cs) {
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+          service.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        if (client?.email) {
+          enqueueEmail('additional-doc-added', {
+            to:          client.email,
+            firstName:   client.first_name,
+            serviceName: svc?.name ?? 'your service',
+            docName:     document_name.trim(),
+          });
+        }
+      }
+    } catch (e) {
+      appLogger.warn('adminAddDocSlot email lookup failed', { err: (e as Error).message });
+    }
+
     res.status(201).json({ data });
   } catch (err) {
     appLogger.error('adminAddDocSlot error', { err });
@@ -459,6 +516,28 @@ export const adminRecordPayoutForService = async (req: Request, res: Response) =
       targetId:   id,
       metadata:   { amount_rupees: amount, texpert_id: cs.assigned_texpert_id },
     });
+
+    // Email texpert about the payout
+    try {
+      const [{ data: texpert }, { data: cs2 }] = await Promise.all([
+        service.from('users').select('email, first_name').eq('id', cs.assigned_texpert_id).single(),
+        service.from('client_services').select('service_id').eq('id', id).single(),
+      ]);
+      const { data: svc } = cs2
+        ? await service.from('services').select('name').eq('id', cs2.service_id).single()
+        : { data: null };
+      if (texpert?.email) {
+        enqueueEmail('payout-recorded', {
+          to:          texpert.email,
+          firstName:   texpert.first_name,
+          serviceName: svc?.name ?? 'a service',
+          amountPaise: amountPaise,
+          notes:       notes?.trim() ?? null,
+        });
+      }
+    } catch (e) {
+      appLogger.warn('adminRecordPayoutForService email lookup failed', { err: (e as Error).message });
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -521,6 +600,50 @@ export const adminUpdateDocStatus = async (req: Request, res: Response) => {
       message:           eventMsg,
       metadata:          { documentId: docId, action, note },
     });
+
+    // Email client (same template texpert uses)
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('user_id, service_id')
+        .eq('id', id)
+        .single();
+      if (cs) {
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+          service.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        if (client?.email) {
+          if (action === 'approve') {
+            enqueueEmail('document-status', {
+              to:           client.email,
+              firstName:    client.first_name,
+              documentName: doc.document_name,
+              status:       'approved',
+            });
+          } else if (action === 'reject') {
+            enqueueEmail('document-status', {
+              to:           client.email,
+              firstName:    client.first_name,
+              documentName: doc.document_name,
+              status:       'rejected',
+              notes:        note ?? undefined,
+              final:        true,
+            });
+          } else {
+            enqueueEmail('reupload-request', {
+              to:           client.email,
+              firstName:    client.first_name,
+              serviceName:  svc?.name ?? 'your service',
+              documentName: doc.document_name,
+              note,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      appLogger.warn('adminUpdateDocStatus email lookup failed', { err: (e as Error).message });
+    }
 
     res.json({ success: true });
   } catch (err) {
