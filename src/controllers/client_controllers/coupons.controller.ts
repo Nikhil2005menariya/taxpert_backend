@@ -58,8 +58,15 @@ export const validateCode = async (req: Request, res: Response) => {
         .select('id')
         .eq('referred_id', req.user.id)
         .maybeSingle();
-
       if (existingReferral) return res.json({ valid: false, error: 'You have already used a referral code' });
+
+      // Referrer has hit the 3-person limit
+      const { count: referralCount } = await req.supabase
+        .from('referrals')
+        .select('id', { count: 'exact', head: true })
+        .eq('referrer_id', referrer.id)
+        .in('status', ['converted', 'rewarded']);
+      if ((referralCount ?? 0) >= 3) return res.json({ valid: false, error: 'This referral code has reached its limit' });
 
       const discount = Math.min(REFERRAL_DISCOUNT_FLAT, servicePrice);
       return res.json({

@@ -27,7 +27,7 @@ import {
 } from '../controllers/admin_controllers/clients.controller';
 import { getQueue, assignTexpert, unassignTexpert, addToQueue } from '../controllers/admin_controllers/assignments.controller';
 import { listPayouts, recordPayout, getTexpertPayouts } from '../controllers/admin_controllers/payouts.controller';
-import { sendNotification } from '../controllers/admin_controllers/notifications.controller';
+import { sendNotification, getNotificationHistory } from '../controllers/admin_controllers/notifications.controller';
 import { getAuditLog } from '../controllers/admin_controllers/audit.controller';
 
 import { authMiddleware } from '../middlewares/auth.middleware';
@@ -95,6 +95,7 @@ router.post('/payouts', recordPayout);
 
 // ── Phase 2: Notifications ────────────────────────────────────
 router.post('/notify', sendNotification);
+router.get('/notify/history', getNotificationHistory);
 
 // ── Phase 2: Audit Log ────────────────────────────────────────
 router.get('/audit', getAuditLog);

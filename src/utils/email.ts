@@ -483,3 +483,126 @@ export async function sendManualNotificationEmail({
     html: emailShell(`<p style="font-size:15px;line-height:1.6">${body}</p>`),
   });
 }
+
+export async function sendPaymentConfirmationEmail({
+  to, firstName, serviceName, amountPaise, paymentId, invoiceNumber,
+}: {
+  to: string;
+  firstName: string;
+  serviceName: string;
+  amountPaise: number;
+  paymentId?: string | null;
+  invoiceNumber?: string | null;
+}) {
+  if (!resend) return;
+  const rupees = (amountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Payment confirmed — ₹${rupees} for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your payment has been received. Here's a summary:</p>
+      <div style="background:#f9f5ec;border-left:3px solid #2f7a5b;padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Service</p>
+        <p style="margin:0 0 14px;font-weight:700;font-size:16px">${serviceName}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Amount Paid</p>
+        <p style="margin:0 0 14px;font-size:24px;font-weight:800;color:#2f7a5b">₹${rupees}</p>
+        ${invoiceNumber ? `<p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Invoice</p><p style="margin:0 0 14px;font-weight:600">${invoiceNumber}</p>` : ''}
+        ${paymentId ? `<p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Payment ID</p><p style="margin:0;font-size:12px;font-family:monospace;color:#475569">${paymentId}</p>` : ''}
+      </div>
+      <p style="font-size:14px;color:#555">Your Taxpert has been notified and will begin working on your service shortly.</p>
+      ${goldButton(`${BASE_URL}/my-services`, 'View My Services')}
+    `),
+  });
+}
+
+export async function sendPaymentFailedEmail({
+  to, firstName, serviceName, reason,
+}: {
+  to: string;
+  firstName: string;
+  serviceName: string;
+  reason?: string | null;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Payment failed — ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p style="background:#fff3f3;border-left:3px solid #b64545;padding:10px 14px;border-radius:0 4px 4px 0;font-weight:600;color:#b64545">
+        ⚠️ Your payment could not be processed
+      </p>
+      <p>We were unable to process your payment for <strong>${serviceName}</strong>.
+         ${reason ? `Reason: ${reason}` : 'This can happen due to insufficient funds, network issues, or bank restrictions.'}</p>
+      <p style="font-size:14px;color:#555">Please try again with a different payment method. Your service has not been activated.</p>
+      ${goldButton(`${BASE_URL}/payments`, 'Retry Payment')}
+      <p style="font-size:13px;color:#666">
+        Need help? Contact us at <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.
+      </p>
+    `),
+  });
+}
+
+export async function sendInvoiceGeneratedEmail({
+  to, firstName, serviceName, invoiceNumber, totalAmountPaise, dueDate,
+}: {
+  to: string;
+  firstName: string;
+  serviceName: string;
+  invoiceNumber: string;
+  totalAmountPaise: number;
+  dueDate?: string | null;
+}) {
+  if (!resend) return;
+  const rupees = (totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  const due = dueDate ? new Date(dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : null;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Invoice ${invoiceNumber} ready — ₹${rupees} due for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your Taxpert has completed work on <strong>${serviceName}</strong> and an invoice is ready for payment.</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Invoice</p>
+        <p style="margin:0 0 14px;font-weight:700">${invoiceNumber}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Amount Due</p>
+        <p style="margin:0 0 ${due ? '14px' : '0'};font-size:24px;font-weight:800;color:#c49a3a">₹${rupees}</p>
+        ${due ? `<p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Due Date</p><p style="margin:0;font-weight:600;color:#b45309">${due}</p>` : ''}
+      </div>
+      ${goldButton(`${BASE_URL}/payments`, 'Pay Now')}
+      <p style="font-size:13px;color:#666">
+        Questions about this invoice? Contact us at <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.
+      </p>
+    `),
+  });
+}
+
+export async function sendCouponIssuedEmail({
+  to, firstName, couponCode, description, validUntil,
+}: {
+  to: string;
+  firstName: string;
+  couponCode: string;
+  description: string;
+  validUntil?: string | null;
+}) {
+  if (!resend) return;
+  const expiry = validUntil ? new Date(validUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : null;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `You've received a discount coupon — ${couponCode}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>A discount coupon has been issued to your account by TheTaxpert:</p>
+      <div style="background:#f9f5ec;border:1px dashed #c49a3a;border-radius:10px;padding:20px 24px;text-align:center;margin:20px 0">
+        <p style="margin:0 0 6px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.08em">Your Coupon Code</p>
+        <p style="margin:0 0 8px;font-size:28px;font-weight:800;letter-spacing:.12em;color:#1a1a2e">${couponCode}</p>
+        <p style="margin:0;font-size:14px;color:#555">${description}</p>
+        ${expiry ? `<p style="margin:8px 0 0;font-size:12px;color:#888">Valid until ${expiry}</p>` : ''}
+      </div>
+      <p style="font-size:14px;color:#555">Apply this code at checkout when paying for your next service.</p>
+      ${goldButton(`${BASE_URL}/payments`, 'Use Coupon')}
+    `),
+  });
+}

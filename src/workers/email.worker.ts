@@ -6,13 +6,25 @@ import {
   sendSignupEmail,
   sendReferralRewardEmail,
   sendDocumentReminderEmail,
-  sendDocumentStatusEmail
+  sendDocumentStatusEmail,
+  sendTexpertAssignedEmail,
+  sendReuploadRequestEmail,
+  sendAdditionalDocAddedEmail,
+  sendTexpertCredentialsEmail,
+  sendPayoutRecordedEmail,
+  sendManualNotificationEmail,
+  sendPaymentConfirmationEmail,
+  sendPaymentFailedEmail,
+  sendInvoiceGeneratedEmail,
+  sendCouponIssuedEmail,
 } from '../utils/email';
+import { appLogger } from '../utils/logger';
 
 export const emailWorker = new Worker('email', async (job: Job) => {
   const { type, payload } = job.data;
-  
+
   switch (type) {
+    // ── Existing ──────────────────────────────────────────────
     case 'workflow-status':
       await sendWorkflowStatusEmail(payload);
       break;
@@ -31,15 +43,53 @@ export const emailWorker = new Worker('email', async (job: Job) => {
     case 'document-status':
       await sendDocumentStatusEmail(payload);
       break;
+
+    // ── Phase 2 — previously missing ─────────────────────────
+    case 'texpert-assigned':
+      await sendTexpertAssignedEmail(payload);
+      break;
+    case 'reupload-request':
+      await sendReuploadRequestEmail(payload);
+      break;
+    case 'additional-doc-added':
+      await sendAdditionalDocAddedEmail(payload);
+      break;
+    case 'texpert-credentials':
+      await sendTexpertCredentialsEmail(payload);
+      break;
+    case 'payout-recorded':
+      await sendPayoutRecordedEmail(payload);
+      break;
+    case 'manual-notification':
+      await sendManualNotificationEmail(payload);
+      break;
+
+    // ── Payment ───────────────────────────────────────────────
+    case 'payment-confirmation':
+      await sendPaymentConfirmationEmail(payload);
+      break;
+    case 'payment-failed':
+      await sendPaymentFailedEmail(payload);
+      break;
+    case 'invoice-generated':
+      await sendInvoiceGeneratedEmail(payload);
+      break;
+    case 'coupon-issued':
+      await sendCouponIssuedEmail(payload);
+      break;
+
     default:
-      console.warn(`Unknown email job type: ${type}`);
+      appLogger.warn(`[EmailWorker] Unknown job type: ${type}`);
   }
-}, { connection: redisConnection });
+}, {
+  connection: redisConnection,
+  concurrency: 5,
+});
 
 emailWorker.on('completed', job => {
-  console.log(`[EmailWorker] Job ${job.id} completed successfully`);
+  appLogger.info(`[EmailWorker] ${job.data.type} sent (job ${job.id})`);
 });
 
 emailWorker.on('failed', (job, err) => {
-  console.error(`[EmailWorker] Job ${job?.id} failed:`, err);
+  appLogger.error(`[EmailWorker] ${job?.data?.type ?? 'unknown'} failed (job ${job?.id})`, { err: err.message });
 });

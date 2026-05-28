@@ -5,6 +5,9 @@ import { recordPaymentInternal } from '../../utils/payments';
 import { trackEvent } from '../../utils/analytics';
 import { autoAssignTaxpert } from '../../utils/auto-assign';
 import { processReferralReward, consumeCoupon } from '../../utils/coupons';
+import { emailQueue } from '../../queues/email.queue';
+import { appLogger } from '../../utils/logger';
+import { writeAudit } from '../../utils/audit';
 
 export const webhookHandler = async (req: Request, res: Response) => {
   try {
@@ -23,6 +26,32 @@ export const webhookHandler = async (req: Request, res: Response) => {
     const event = JSON.parse(rawBody.toString('utf8'));
 
     await trackEvent('webhook_received', null, { event_type: event.event });
+
+    if (event.event === 'payment.failed') {
+      const failedPayment = event.payload.payment.entity;
+      const { user_id: failedUserId, service_slug: failedSlug } = failedPayment.notes ?? {};
+      if (failedUserId) {
+        try {
+          const supabase = createServiceClient();
+          const [{ data: clientUser }, { data: svc }] = await Promise.all([
+            supabase.from('users').select('first_name, email').eq('id', failedUserId).single(),
+            failedSlug ? supabase.from('services').select('name').eq('slug', failedSlug).single() : Promise.resolve({ data: null }),
+          ]);
+          if (clientUser?.email) {
+            emailQueue.add('payment-failed', {
+              type: 'payment-failed',
+              payload: {
+                to:          clientUser.email,
+                firstName:   clientUser.first_name,
+                serviceName: svc?.name ?? failedSlug ?? 'your service',
+                reason:      failedPayment.error_description ?? null,
+              },
+            }).catch(console.error);
+          }
+        } catch {}
+      }
+      return res.json({ received: true });
+    }
 
     if (event.event !== 'payment.captured') {
       return res.json({ received: true });
@@ -105,12 +134,12 @@ export const webhookHandler = async (req: Request, res: Response) => {
     try {
       const assignment = await autoAssignTaxpert(supabase, user_id);
       if (assignment.error) {
-        console.warn('[webhook] autoAssignTaxpert:', assignment.error);
+        appLogger.warn('[webhook] autoAssignTaxpert:', assignment.error);
       } else if (assignment.assigned) {
-        console.log(`[webhook] auto-assigned ${assignment.taxpertName} to client ${user_id}`);
+        appLogger.info(`[webhook] auto-assigned ${(assignment as any).taxpertName} to client ${user_id}`);
       }
     } catch (err) {
-      console.error('[webhook] autoAssignTaxpert threw:', err);
+      appLogger.error('[webhook] autoAssignTaxpert threw:', err);
     }
 
     const { data: docReqs } = await supabase
@@ -169,6 +198,43 @@ export const webhookHandler = async (req: Request, res: Response) => {
       source: 'webhook',
     }).catch(console.error);
 
+    writeAudit({
+      actorId:    user_id ?? 'system',
+      action:     'payment_captured',
+      targetType: 'payment',
+      targetId:   payment.id,
+      metadata: {
+        razorpayOrderId:  payment.order_id,
+        userId:           user_id,
+        serviceSlug:      service_slug,
+        amountPaise:      payment.amount,
+        couponId:         coupon_id ?? null,
+        clientServiceId:  cs.id,
+        source:           'main_webhook',
+      },
+    }).catch(console.error);
+
+    // Send payment confirmation email (non-blocking)
+    try {
+      const [{ data: clientUser }, { data: invoice }] = await Promise.all([
+        supabase.from('users').select('first_name, email').eq('id', user_id).single(),
+        supabase.from('invoices').select('invoice_number').eq('client_service_id', cs.id).maybeSingle(),
+      ]);
+      if (clientUser?.email) {
+        emailQueue.add('payment-confirmation', {
+          type: 'payment-confirmation',
+          payload: {
+            to:            clientUser.email,
+            firstName:     clientUser.first_name,
+            serviceName:   service.name,
+            amountPaise:   payment.amount,
+            paymentId:     payment.id,
+            invoiceNumber: invoice?.invoice_number ?? null,
+          },
+        }).catch(console.error);
+      }
+    } catch {}
+
     if (referrer_id && referral_code) {
       processReferralReward({
         referrerId: referrer_id,
@@ -185,7 +251,7 @@ export const webhookHandler = async (req: Request, res: Response) => {
 
     res.json({ received: true });
   } catch (error) {
-    console.error('webhookHandler error:', error);
+    appLogger.error('webhookHandler error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

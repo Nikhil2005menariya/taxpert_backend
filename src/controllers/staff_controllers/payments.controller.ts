@@ -5,29 +5,38 @@ import { createServiceClient } from '../../configs/supabase.config';
 export const getAllPayments = async (req: Request, res: Response) => {
   try {
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
-    const { startDate, endDate, userId, serviceId, status } = req.query;
+    const { startDate, endDate, userId, serviceId, status, method } = req.query;
 
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
     if (!isStaffRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
 
-    let query = req.supabase
+    // Use service client — payments.user_id references auth.users so FK-hint joins won't work
+    const sc = createServiceClient();
+    let query = sc
       .from('payments')
-      .select(`
-        *,
-        service:services(name, category),
-        user_profile:users!payments_user_id_fkey(first_name, last_name, pan)
-      `)
-      .order('created_at', { ascending: false });
+      .select('id, amount, base_amount, gst_amount, gst_rate, discount_amount, original_amount, status, payment_method, captured_at, created_at, razorpay_payment_id, razorpay_order_id, coupon_id, user_id, service_id, client_service_id')
+      .order('captured_at', { ascending: false, nullsFirst: false });
 
-    if (startDate) query = query.gte('created_at', startDate as string);
-    if (endDate) query = query.lte('created_at', `${endDate}T23:59:59`);
-    if (userId) query = query.eq('user_id', userId as string);
+    if (startDate) query = query.gte('captured_at', startDate as string);
+    if (endDate)   query = query.lte('captured_at', `${endDate}T23:59:59Z`);
+    if (userId)    query = query.eq('user_id', userId as string);
     if (serviceId) query = query.eq('service_id', serviceId as string);
-    if (status) query = query.eq('status', status as string);
+    if (status)    query = query.eq('status', status as string);
+    if (method)    query = query.eq('payment_method', method as string);
 
-    const { data, error } = await query;
+    const { data: payments, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ data });
+
+    // Enrich with user + service via separate queries (avoids FK cache dependency)
+    const enriched = await Promise.all((payments ?? []).map(async (p: any) => {
+      const [{ data: user }, { data: svc }] = await Promise.all([
+        sc.from('users').select('first_name, last_name, email, pan').eq('id', p.user_id).single(),
+        sc.from('services').select('name, category').eq('id', p.service_id).single(),
+      ]);
+      return { ...p, user_profile: user ?? null, service: svc ?? null };
+    }));
+
+    res.json({ data: enriched });
   } catch (error) {
     console.error('getAllPayments error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -41,22 +50,23 @@ export const getPaymentStats = async (req: Request, res: Response) => {
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
     if (!isStaffRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
 
-    const { data, error } = await req.supabase
-      .from('payments')
-      .select('amount, gst_amount, created_at')
-      .eq('status', 'captured');
-
-    if (error) return res.status(400).json({ error: error.message });
-
+    const sc = createServiceClient();
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-    const total = data?.reduce((s, p) => s + p.amount, 0) ?? 0;
-    const gst = data?.reduce((s, p) => s + p.gst_amount, 0) ?? 0;
-    const count = data?.length ?? 0;
-    const thisMonth = data?.filter(p => p.created_at >= monthStart).reduce((s, p) => s + p.amount, 0) ?? 0;
+    const [capturedRes, failedRes, monthRes] = await Promise.all([
+      sc.from('payments').select('amount, gst_amount').eq('status', 'captured'),
+      sc.from('payments').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
+      sc.from('payments').select('amount').eq('status', 'captured').gte('captured_at', monthStart),
+    ]);
 
-    res.json({ data: { total, gst, count, thisMonth } });
+    const total     = (capturedRes.data ?? []).reduce((s, p) => s + p.amount, 0);
+    const gst       = (capturedRes.data ?? []).reduce((s, p) => s + (p.gst_amount ?? 0), 0);
+    const count     = capturedRes.data?.length ?? 0;
+    const thisMonth = (monthRes.data ?? []).reduce((s, p) => s + p.amount, 0);
+    const failed    = failedRes.count ?? 0;
+
+    res.json({ data: { total, gst, count, thisMonth, failed } });
   } catch (error) {
     console.error('getPaymentStats error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -225,12 +235,11 @@ export const getInvoiceSettings = async (req: Request, res: Response) => {
   try {
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
-
-    const { data, error } = await req.supabase
+    // Any authenticated user can read — used on the client invoice page
+    const sc = createServiceClient();
+    const { data, error } = await sc
       .from('invoice_settings')
-      .select('*')
+      .select('business_name, support_email, support_phone, website, pan, invoice_prefix, bank_name, account_holder_name, account_number, ifsc, upi_id, default_terms, payment_instructions, logo_url')
       .eq('id', '00000000-0000-0000-0000-000000000001')
       .single();
 

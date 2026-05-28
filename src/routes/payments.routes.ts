@@ -35,6 +35,9 @@ router.get('/my-payments', getMyPayments);
 router.get('/pending-invoices', getPendingClientInvoices);
 router.post('/create-order', createOrder);
 
+// Invoice settings — any authenticated user can read (used on the invoice page)
+router.get('/invoice-settings', getInvoiceSettings);
+
 // Invoices (Client)
 router.get('/invoices/:clientServiceId', getOrCreateInvoice);
 

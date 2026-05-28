@@ -134,7 +134,7 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
     // All related rows are fetched as separate parallel queries instead.
     const { data: cs, error } = await service
       .from('client_services')
-      .select('id, status, fiscal_year, notes, payment_status, payment_id, razorpay_order_id, user_id, service_id, assigned_texpert_id, created_at, updated_at')
+      .select('id, status, fiscal_year, notes, payment_status, payment_id, razorpay_order_id, pinned_message, is_blocked, blocked_reason, user_id, service_id, assigned_texpert_id, created_at, updated_at')
       .eq('id', id)
       .single();
 
@@ -210,8 +210,7 @@ export const adminUpdateService = async (req: Request, res: Response) => {
   try {
     if (!await assertAdmin(req, res)) return;
     const { id } = req.params;
-    const { status, notes } = req.body;
-    // is_blocked, blocked_reason, pinned_message available after running phase2b migration
+    const { status, notes, is_blocked, blocked_reason, pinned_message } = req.body;
 
     const ALLOWED_STATUSES = [
       'documents_required', 'documents_received', 'in_progress',
@@ -227,6 +226,15 @@ export const adminUpdateService = async (req: Request, res: Response) => {
       updatePayload.status_updated_at = new Date().toISOString();
     }
     if (notes !== undefined) updatePayload.notes = notes;
+    if (is_blocked !== undefined) {
+      updatePayload.is_blocked = is_blocked;
+      updatePayload.blocked_at = is_blocked ? new Date().toISOString() : null;
+    }
+    if (blocked_reason !== undefined) updatePayload.blocked_reason = blocked_reason;
+    if (pinned_message !== undefined) {
+      updatePayload.pinned_message = pinned_message;
+      updatePayload.pinned_message_at = pinned_message ? new Date().toISOString() : null;
+    }
 
     if (Object.keys(updatePayload).length === 0) {
       return res.status(400).json({ error: 'Nothing to update' });

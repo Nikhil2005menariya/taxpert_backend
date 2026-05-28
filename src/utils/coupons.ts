@@ -6,11 +6,19 @@ const REFERRAL_REWARD_CAP = 100000;
 
 export async function consumeCoupon(couponId: string, userId?: string, paymentId?: string) {
   const supabase = createServiceClient();
-  await supabase.rpc('increment_coupon_used', {
-    coupon_id: couponId,
-    p_user_id: userId ?? null,
-    p_payment_id: paymentId ?? null,
-  });
+
+  // Record usage (UNIQUE constraint on coupon_id+user_id handles idempotency)
+  if (userId) {
+    await supabase.from('coupon_usages').insert({
+      coupon_id:  couponId,
+      user_id:    userId,
+      payment_id: paymentId ?? null,
+      used_at:    new Date().toISOString(),
+    });
+  }
+
+  // Increment the counter
+  await supabase.rpc('increment_coupon_used', { p_coupon_id: couponId });
 }
 
 export async function processReferralReward({
@@ -28,13 +36,21 @@ export async function processReferralReward({
 }) {
   const supabase = createServiceClient();
 
+  // Skip if this referred user already has a referral recorded
   const { data: existing } = await supabase
     .from('referrals')
     .select('id')
     .eq('referred_id', referredId)
     .maybeSingle();
-
   if (existing) return;
+
+  // Enforce referral limit of 3 per referrer
+  const { count } = await supabase
+    .from('referrals')
+    .select('id', { count: 'exact', head: true })
+    .eq('referrer_id', referrerId)
+    .in('status', ['converted', 'rewarded']);
+  if ((count ?? 0) >= 3) return;
 
   const rewardAmount = Math.min(
     Math.round((paymentAmount * REFERRAL_REWARD_PERCENT) / 100),
