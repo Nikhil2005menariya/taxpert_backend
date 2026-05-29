@@ -18,6 +18,8 @@ import {
   updateNotesField,
   // Phase 5 — dashboard
   getDashboard,
+  // Phase 6 — payouts
+  getTexpertOwnPayouts,
 } from '../../controllers/staff_controllers/texpert.controller';
 import { authMiddleware } from '../../middlewares/auth.middleware';
 
@@ -26,6 +28,9 @@ router.use(authMiddleware);
 
 // ── Dashboard ────────────────────────────────────────────────
 router.get('/dashboard',                             getDashboard);
+
+// ── Payouts ──────────────────────────────────────────────────
+router.get('/payouts',                               getTexpertOwnPayouts);
 
 // ── Assigned services ────────────────────────────────────────
 router.get('/services',                              getAssignedServices);

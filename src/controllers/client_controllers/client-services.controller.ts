@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { isAdminRole, isStaffRole, UserRole } from '../../shared/roles';
 import { getAssignedClientIds, canAccessClientServiceRecord } from '../../utils/service-access';
 import { logServiceEvent } from '../../utils/operations';
+import { createServiceClient } from '../../configs/supabase.config';
 
 const SERVICE_SELECT = `
   id, user_id, service_id, status, payment_status, payment_id,
@@ -167,13 +168,14 @@ export const getClientServiceById = async (req: Request, res: Response) => {
     const { data, error: queryError } = await req.supabase
       .from('client_services')
       .select(`
-        id, user_id, service_id, status, payment_status, payment_id, notes,
+        id, user_id, service_id, status, payment_status, payment_id,
+        pinned_message, pinned_message_at,
         fiscal_year, assigned_to, assigned_by, status_updated_at, created_at, updated_at,
         deletion_requested, deletion_requested_at,
         service:services(id, name, category, slug),
         client_documents(
           id, template_id, document_name, status, file_path,
-          notes, uploaded_at, verified_at, verified_by
+          notes, reupload_requested, reupload_note, uploaded_at, verified_at, verified_by
         )
       `)
       .eq('id', id)
@@ -206,19 +208,26 @@ export const removeServiceDirect = async (req: Request, res: Response) => {
 
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
 
-    const { data: cs } = await req.supabase
+    // Use service client (bypasses RLS) for the real reads/writes; req.supabase only for auth
+    const sc = createServiceClient();
+    const { data: cs } = await sc
       .from('client_services')
-      .select('id, user_id, client_documents(id)')
+      .select('id, user_id')
       .eq('id', id)
       .single();
 
     if (!cs) return res.status(404).json({ error: 'Service not found' });
     if (!isStaffRole(profile?.role) && cs.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    const docCount = (cs.client_documents as { id: string }[] | null)?.length ?? 0;
-    if (docCount > 0) return res.status(400).json({ error: 'Documents exist — use requestServiceDeletion instead' });
+    // Count docs via service client
+    const { count: docCount } = await sc
+      .from('client_documents')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_service_id', id);
 
-    const { error } = await req.supabase.from('client_services').delete().eq('id', id);
+    if ((docCount ?? 0) > 0) return res.status(400).json({ error: 'Service has documents — request deletion instead so your Taxpert can review.' });
+
+    const { error } = await sc.from('client_services').delete().eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
 
     res.json({ success: true });
@@ -233,12 +242,15 @@ export const requestServiceDeletion = async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: cs } = await req.supabase.from('client_services').select('id, user_id').eq('id', id).single();
+    const sc = createServiceClient();
+
+    // Verify ownership via service client
+    const { data: cs } = await sc.from('client_services').select('id, user_id').eq('id', id).single();
     if (!cs) return res.status(404).json({ error: 'Service not found' });
     if (cs.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
     const now = new Date().toISOString();
-    const { error } = await req.supabase
+    const { error } = await sc
       .from('client_services')
       .update({ deletion_requested: true, deletion_requested_at: now, updated_at: now })
       .eq('id', id);
@@ -264,11 +276,13 @@ export const cancelDeletionRequest = async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: cs } = await req.supabase.from('client_services').select('id, user_id').eq('id', id).single();
+    const sc = createServiceClient();
+
+    const { data: cs } = await sc.from('client_services').select('id, user_id').eq('id', id).single();
     if (!cs) return res.status(404).json({ error: 'Service not found' });
     if (cs.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    const { error } = await req.supabase
+    const { error } = await sc
       .from('client_services')
       .update({ deletion_requested: false, deletion_requested_at: null })
       .eq('id', id);

@@ -108,7 +108,7 @@ export const getServiceDetail = async (req: Request, res: Response) => {
     // Base row — scalar columns only (no FK-hint joins, since multiple FKs to users would fail)
     const { data: cs, error } = await service
       .from('client_services')
-      .select('id, status, fiscal_year, notes, payment_status, payment_id, pinned_message, is_blocked, blocked_reason, user_id, service_id, assigned_texpert_id, assigned_texpert_at, created_at, updated_at')
+      .select('id, status, fiscal_year, notes, payment_status, payment_id, pinned_message, is_blocked, blocked_reason, deletion_requested, deletion_requested_at, user_id, service_id, assigned_texpert_id, assigned_texpert_at, created_at, updated_at')
       .eq('id', id)
       .eq('assigned_texpert_id', req.user!.id)
       .single();
@@ -1086,6 +1086,105 @@ export const getDashboard = async (req: Request, res: Response) => {
     });
   } catch (err) {
     appLogger.error('getDashboard error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const getTexpertOwnPayouts = async (req: Request, res: Response) => {
+  try {
+    if (!await assertTexpert(req, res)) return;
+    const sc  = createServiceClient();
+    const uid = req.user!.id;
+
+    const startDate = String(req.query.startDate ?? '').trim();
+    const endDate   = String(req.query.endDate   ?? '').trim();
+    const serviceId = String(req.query.serviceId ?? '').trim();
+
+    const now        = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const last30Iso  = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Fetch filtered payouts (scalar only — no FK joins)
+    let query = sc
+      .from('texpert_payouts')
+      .select('id, amount, paid_at, notes, client_service_id')
+      .eq('texpert_id', uid)
+      .order('paid_at', { ascending: false });
+
+    if (startDate) query = query.gte('paid_at', startDate);
+    if (endDate)   query = query.lte('paid_at', endDate + 'T23:59:59');
+
+    const { data: payouts, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    const allPayouts = payouts ?? [];
+
+    // Gather unique client_service IDs
+    const csIds = [...new Set(allPayouts.map((p: any) => p.client_service_id).filter(Boolean))] as string[];
+
+    const csRows: any[] = csIds.length
+      ? (await sc.from('client_services').select('id, user_id, service_id').in('id', csIds)).data ?? []
+      : [];
+
+    // Apply serviceId filter via client_services mapping
+    const filteredPayouts = serviceId
+      ? allPayouts.filter((p: any) => {
+          const cs = csRows.find((r: any) => r.id === p.client_service_id);
+          return cs?.service_id === serviceId;
+        })
+      : allPayouts;
+
+    // Batch-lookup services + clients for filtered rows only
+    const filteredCsRows = csRows.filter((r: any) =>
+      filteredPayouts.some((p: any) => p.client_service_id === r.id)
+    );
+    const svcIds  = [...new Set(filteredCsRows.map((r: any) => r.service_id).filter(Boolean))] as string[];
+    const userIds = [...new Set(filteredCsRows.map((r: any) => r.user_id).filter(Boolean))] as string[];
+
+    const [svcRes, clientRes] = await Promise.all([
+      svcIds.length  ? sc.from('services').select('id, name, category').in('id', svcIds)    : Promise.resolve({ data: [] as any[] }),
+      userIds.length ? sc.from('users').select('id, first_name').in('id', userIds)           : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const svcMap    = new Map<string, any>(); for (const s of svcRes.data    ?? []) svcMap.set(s.id, s);
+    const clientMap = new Map<string, any>(); for (const c of clientRes.data ?? []) clientMap.set(c.id, c);
+    const csMap     = new Map<string, any>(); for (const r of filteredCsRows)       csMap.set(r.id, r);
+
+    const data = filteredPayouts.map((p: any) => {
+      const cs     = csMap.get(p.client_service_id);
+      const svc    = svcMap.get(cs?.service_id);
+      const client = clientMap.get(cs?.user_id);
+      return {
+        id:      p.id,
+        amount:  p.amount,
+        paid_at: p.paid_at,
+        notes:   p.notes,
+        service: svc    ? { name: svc.name, category: svc.category } : null,
+        client:  client ? { first_name: client.first_name, service_id: p.client_service_id } : null,
+      };
+    });
+
+    // Distinct services for filter dropdown (from ALL unfiltered payouts)
+    const allSvcIds = [...new Set(csRows.map((r: any) => r.service_id).filter(Boolean))] as string[];
+    const allSvcRes = allSvcIds.length
+      ? (await sc.from('services').select('id, name').in('id', allSvcIds)).data ?? []
+      : [];
+    const services = allSvcRes.map((s: any) => ({ id: s.id, name: s.name }));
+
+    // Stats from ALL payouts for this texpert (unfiltered)
+    const { data: allP } = await sc
+      .from('texpert_payouts')
+      .select('amount, paid_at')
+      .eq('texpert_id', uid);
+
+    const all = allP ?? [];
+    const totalEarned = all.reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
+    const thisMonth   = all.filter((p: any) => p.paid_at && p.paid_at >= monthStart).reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
+    const last30Days  = all.filter((p: any) => p.paid_at && p.paid_at >= last30Iso).reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
+
+    res.json({ data, services, stats: { totalEarned, thisMonth, last30Days } });
+  } catch (err) {
+    appLogger.error('getTexpertOwnPayouts error', { err });
     res.status(500).json({ error: 'Internal server error' });
   }
 };
