@@ -115,10 +115,10 @@ export const updateServicePrice = async (req: Request, res: Response) => {
 };
 
 // --- Invoices endpoints (bundled into payments router or separate router) ---
+// Avoid FK-hint on users (constraint name varies by migration) — fetch client separately
 const INVOICE_SELECT = `
   *,
   invoice_items(*),
-  client:users!invoices_client_id_fkey(first_name, last_name, email, pan),
   service:services(name, category, slug)
 `;
 
@@ -127,16 +127,27 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
     const { clientServiceId } = req.params;
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: existing, error: fetchErr } = await req.supabase
+    const sc = createServiceClient();
+
+    // Use service client for all reads — avoids RLS blocking invoice fetches
+    const { data: existing, error: fetchErr } = await sc
       .from('invoices')
       .select(INVOICE_SELECT)
       .eq('client_service_id', clientServiceId)
       .maybeSingle();
 
     if (fetchErr) return res.status(400).json({ error: fetchErr.message });
-    if (existing) return res.json({ data: existing });
+    if (existing) {
+      // Attach client profile (not in INVOICE_SELECT to avoid FK-hint issues)
+      const { data: clientProfile } = await sc
+        .from('users')
+        .select('first_name, last_name, email, pan')
+        .eq('id', existing.client_id)
+        .single();
+      return res.json({ data: { ...existing, client: clientProfile ?? null } });
+    }
 
-    const { data: cs, error: csErr } = await req.supabase
+    const { data: cs, error: csErr } = await sc
       .from('client_services')
       .select('id, user_id, service_id, status, service:services(id, name, category, slug, price)')
       .eq('id', clientServiceId)
@@ -148,31 +159,31 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
     const svc = Array.isArray(cs.service) ? cs.service[0] : cs.service;
     const price = svc?.price ?? 0;
 
-    const { data: settings } = await req.supabase
+    // Use service client for all DB ops — avoids RLS blocking invoice creation or RPC calls
+    const { data: settings } = await sc
       .from('invoice_settings')
       .select('invoice_prefix')
       .limit(1)
       .maybeSingle();
 
     const prefix = settings?.invoice_prefix ?? 'TTP';
-    const { data: invoiceNum } = await req.supabase.rpc('generate_invoice_number', { prefix });
+    const { data: invoiceNum } = await sc.rpc('generate_invoice_number', { prefix });
     const invoiceNumber = invoiceNum ?? `${prefix}-${Date.now()}`;
 
-    const sc = createServiceClient();
     const dueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
     const { data: invoice, error: createErr } = await sc
       .from('invoices')
       .insert({
-        invoice_number: invoiceNumber,
-        client_id: req.user.id,
+        invoice_number:    invoiceNumber,
+        client_id:         req.user.id,
         client_service_id: clientServiceId,
-        service_id: svc?.id ?? cs.service_id,
-        status: 'pending',
-        subtotal: price,
-        total_amount: price,
-        issued_at: new Date().toISOString(),
-        due_date: dueDate,
+        service_id:        svc?.id ?? cs.service_id,
+        status:            'pending',
+        subtotal:          price,
+        total_amount:      price,
+        issued_at:         new Date().toISOString(),
+        due_date:          dueDate,
       })
       .select()
       .single();
@@ -180,22 +191,30 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
     if (createErr || !invoice) return res.status(500).json({ error: createErr?.message ?? 'Failed to create invoice' });
 
     await sc.from('invoice_items').insert({
-      invoice_id: invoice.id,
-      service_id: svc?.id ?? cs.service_id,
+      invoice_id:  invoice.id,
+      service_id:  svc?.id ?? cs.service_id,
       description: svc?.name ?? 'Professional Tax Service',
-      quantity: 1,
-      unit_price: price,
-      line_total: price,
+      quantity:    1,
+      unit_price:  price,
+      line_total:  price,
     });
 
-    const { data: full, error: fullErr } = await req.supabase
+    // Re-fetch full invoice with relations, then attach client profile
+    const { data: full, error: fullErr } = await sc
       .from('invoices')
       .select(INVOICE_SELECT)
       .eq('id', invoice.id)
       .single();
 
     if (fullErr) return res.status(400).json({ error: fullErr.message });
-    res.json({ data: full });
+
+    const { data: clientProfile } = await sc
+      .from('users')
+      .select('first_name, last_name, email, pan')
+      .eq('id', req.user.id)
+      .single();
+
+    res.json({ data: { ...full, client: clientProfile ?? null } });
   } catch (error) {
     console.error('getOrCreateInvoice error:', error);
     res.status(500).json({ error: 'Internal server error' });

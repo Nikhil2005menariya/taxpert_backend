@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
 import { calcDiscount } from '../../utils/finance';
 
-const REFERRAL_DISCOUNT_FLAT = 50000;
-
 export const validateCode = async (req: Request, res: Response) => {
   try {
     const { code, servicePrice } = req.body;
@@ -34,53 +32,21 @@ export const validateCode = async (req: Request, res: Response) => {
 
       const discount = calcDiscount(coupon as any, servicePrice);
       return res.json({
-        valid: true,
-        codeType: 'coupon',
-        couponId: coupon.id,
-        couponCode: coupon.code,
+        valid:          true,
+        codeType:       'coupon',
+        couponId:       coupon.id,
+        couponCode:     coupon.code,
         discountAmount: discount,
-        finalAmount: servicePrice - discount,
-        description: coupon.description ?? (coupon.type === 'flat' ? `₹${(coupon.value / 100).toLocaleString('en-IN')} off` : `${coupon.value / 100}% off`),
+        finalAmount:    servicePrice - discount,
+        description:    coupon.description ?? (coupon.type === 'flat'
+          ? `₹${(coupon.value / 100).toLocaleString('en-IN')} off`
+          : `${coupon.value / 100}% off`),
       });
     }
 
-    const { data: referrer } = await req.supabase
-      .from('users')
-      .select('id, first_name')
-      .eq('referral_code', code.toUpperCase().trim())
-      .single();
-
-    if (referrer) {
-      if (referrer.id === req.user.id) return res.json({ valid: false, error: 'You cannot use your own referral code' });
-
-      const { data: existingReferral } = await req.supabase
-        .from('referrals')
-        .select('id')
-        .eq('referred_id', req.user.id)
-        .maybeSingle();
-      if (existingReferral) return res.json({ valid: false, error: 'You have already used a referral code' });
-
-      // Referrer has hit the 3-person limit
-      const { count: referralCount } = await req.supabase
-        .from('referrals')
-        .select('id', { count: 'exact', head: true })
-        .eq('referrer_id', referrer.id)
-        .in('status', ['converted', 'rewarded']);
-      if ((referralCount ?? 0) >= 3) return res.json({ valid: false, error: 'This referral code has reached its limit' });
-
-      const discount = Math.min(REFERRAL_DISCOUNT_FLAT, servicePrice);
-      return res.json({
-        valid: true,
-        codeType: 'referral',
-        referrerId: referrer.id,
-        referralCode: code.toUpperCase().trim(),
-        discountAmount: discount,
-        finalAmount: servicePrice - discount,
-        description: `Referral by ${referrer.first_name} — ₹${(discount / 100).toLocaleString('en-IN')} off`,
-      });
-    }
-
-    res.json({ valid: false, error: 'Invalid code' });
+    // Referral codes are NOT valid at checkout — they are entered at signup only.
+    // Reward coupons issued to referrers are standard coupons (type='flat') and work above.
+    res.json({ valid: false, error: 'Invalid coupon code' });
   } catch (error) {
     console.error('validateCode error:', error);
     res.status(500).json({ error: 'Internal server error' });
