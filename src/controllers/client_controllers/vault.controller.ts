@@ -4,6 +4,7 @@ import { getFYFromDate } from '../../shared/fy-utils';
 import { logServiceEvent } from '../../utils/operations';
 import { canAccessClientServiceRecord } from '../../utils/service-access';
 import { mirrorServiceDocToCommon, propagateCommonDocToServices, prefillServiceDocsFromCommon } from '../../utils/doc-sync';
+import { createServiceClient } from '../../configs/supabase.config';
 
 export const getVaultGroups = async (req: Request, res: Response) => {
   try {
@@ -301,16 +302,38 @@ export const uploadDocument = async (req: Request, res: Response) => {
       pan,
     ).catch(console.error);
 
-    // Auto-advance
-    const { data: allDocs } = await req.supabase.from('client_documents').select('status').eq('client_service_id', serviceId);
+    // Auto-advance + queue entry when all docs uploaded
+    const sc = createServiceClient();
+    const { data: allDocs } = await sc.from('client_documents').select('status').eq('client_service_id', serviceId);
     const allUploaded = allDocs && allDocs.length > 0 &&
       allDocs.every((d: any) => d.status === 'uploaded' || d.status === 'under_review' || d.status === 'approved');
 
     if (allUploaded) {
       const now2 = new Date().toISOString();
-      const { data: svcRow } = await req.supabase.from('client_services').select('status').eq('id', serviceId).single();
+      const { data: svcRow } = await sc.from('client_services').select('status, assigned_texpert_id').eq('id', serviceId).single();
       if (svcRow && (svcRow.status === 'documents_required' || svcRow.status === 'pending')) {
-        await req.supabase.from('client_services').update({ status: 'documents_received', status_updated_at: now2, updated_at: now2 }).eq('id', serviceId);
+        await sc.from('client_services').update({ status: 'documents_received', status_updated_at: now2, updated_at: now2 }).eq('id', serviceId);
+      }
+
+      // Ensure a queue entry exists with priority 5 (docs ready — bump urgency).
+      // Only add/update if service has no texpert assigned yet.
+      if (!svcRow?.assigned_texpert_id) {
+        const { data: existingQ } = await sc
+          .from('service_assignment_queue')
+          .select('id, priority')
+          .eq('client_service_id', serviceId)
+          .eq('status', 'open')
+          .maybeSingle();
+
+        if (existingQ) {
+          // Bump priority now that docs are ready
+          if ((existingQ.priority ?? 0) < 5) {
+            await sc.from('service_assignment_queue').update({ priority: 5 }).eq('id', existingQ.id);
+          }
+        } else {
+          // No queue entry yet — insert one
+          await sc.from('service_assignment_queue').insert({ client_service_id: serviceId, priority: 5 });
+        }
       }
     }
 

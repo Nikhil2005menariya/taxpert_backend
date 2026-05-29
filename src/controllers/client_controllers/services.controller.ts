@@ -80,6 +80,11 @@ export const assignService = async (req: Request, res: Response) => {
 
     if (csErr || !cs) return res.status(400).json({ error: csErr?.message ?? 'Failed to assign service' });
 
+    // Add to assignment queue immediately — admin/texpert can see and action it
+    void serviceClient.from('service_assignment_queue')
+      .insert({ client_service_id: cs.id, priority: 0 })
+      .then(({ error }) => { if (error) console.error('[queue] insert failed:', error.message); });
+
     // Auto-assign
     autoAssignTaxpert(serviceClient, req.user.id).catch(console.error);
 
