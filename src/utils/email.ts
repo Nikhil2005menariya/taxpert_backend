@@ -610,3 +610,77 @@ export async function sendCouponIssuedEmail({
     `),
   });
 }
+
+export async function sendPaymentOverdueEmail({
+  to, firstName, serviceName, invoiceNumber, totalAmountPaise, daysOverdue, payLink,
+}: {
+  to: string;
+  firstName: string;
+  serviceName: string;
+  invoiceNumber: string;
+  totalAmountPaise: number;
+  daysOverdue: number;
+  payLink: string;
+}) {
+  if (!resend) return;
+  const rupees = (totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Payment overdue — Invoice ${invoiceNumber} for ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <div style="background:#fff3f3;border-left:3px solid #b64545;padding:12px 16px;border-radius:0 8px 8px 0;margin:0 0 20px">
+        <p style="margin:0;font-weight:700;color:#b64545">⚠️ Payment overdue by ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''}</p>
+      </div>
+      <p>Your invoice for <strong>${serviceName}</strong> was due for payment and has not been settled yet.</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Invoice</p>
+        <p style="margin:0 0 14px;font-weight:700">${invoiceNumber}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Amount Due</p>
+        <p style="margin:0;font-size:24px;font-weight:800;color:#c49a3a">₹${rupees}</p>
+      </div>
+      <p>Please complete your payment at the earliest to avoid any disruption to your service.</p>
+      ${goldButton(payLink, 'Pay Now →')}
+      <p style="font-size:13px;color:#666;margin-top:20px">
+        If you have already made the payment or have a query, please reply to this email or contact us at
+        <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.
+      </p>
+    `),
+  });
+}
+
+export async function sendPaymentOverdueEscalationEmail({
+  to, firstName, serviceName, invoiceNumber, totalAmountPaise, daysOverdue, payLink,
+}: {
+  to: string;
+  firstName: string;
+  serviceName: string;
+  invoiceNumber: string;
+  totalAmountPaise: number;
+  daysOverdue: number;
+  payLink: string;
+}) {
+  if (!resend) return;
+  const rupees = (totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Urgent: Invoice ${invoiceNumber} is ${daysOverdue} days overdue — action required`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <div style="background:#fff3f3;border-left:3px solid #b64545;padding:12px 16px;border-radius:0 8px 8px 0;margin:0 0 20px">
+        <p style="margin:0;font-weight:700;color:#b64545">🚨 Invoice ${daysOverdue} days overdue — urgent action required</p>
+      </div>
+      <p>We have still not received payment for your <strong>${serviceName}</strong> invoice (${invoiceNumber}). This invoice is now <strong>${daysOverdue} days past its due date</strong>.</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Outstanding Amount</p>
+        <p style="margin:0;font-size:24px;font-weight:800;color:#c49a3a">₹${rupees}</p>
+      </div>
+      <p>Please settle this immediately. Continued non-payment may affect your service status.</p>
+      ${goldButton(payLink, 'Pay Now →')}
+      <p style="font-size:13px;color:#666;margin-top:20px">
+        If you believe this is an error or need to discuss payment, please contact us immediately at
+        <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.
+      </p>
+    `),
+  });
+}

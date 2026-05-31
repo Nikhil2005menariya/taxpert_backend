@@ -4,9 +4,6 @@ import {
   createUser,
   updateUserRole,
   setUserPassword,
-  getAssignments,
-  assignToClient,
-  removeAssignment,
   getFilingCountsByClient,
   getActiveTaxperts,
   quickAssignTaxpert,
@@ -29,6 +26,7 @@ import { getQueue, assignTexpert, unassignTexpert, addToQueue } from '../../cont
 import { listPayouts, recordPayout, getTexpertPayouts } from '../../controllers/admin_controllers/payouts.controller';
 import { sendNotification, getNotificationHistory } from '../../controllers/admin_controllers/notifications.controller';
 import { getAuditLog } from '../../controllers/admin_controllers/audit.controller';
+import { getDashboardStats } from '../../controllers/admin_controllers/dashboard.controller';
 
 import { authMiddleware } from '../../middlewares/auth.middleware';
 
@@ -41,12 +39,11 @@ router.post('/users', createUser);
 router.patch('/users/role', updateUserRole);
 router.patch('/users/password', setUserPassword);
 
-// ── Legacy CA Assignments ─────────────────────────────────────
-router.get('/assignments', getAssignments);
-router.post('/assignments', assignToClient);
-router.delete('/assignments', removeAssignment);
 router.post('/taxperts/quick-assign', quickAssignTaxpert);
 router.get('/taxperts/client/:clientId', getClientTaxpert);
+
+// ── Dashboard Stats ───────────────────────────────────────────
+router.get('/dashboard-stats', getDashboardStats);
 
 // ── Analytics ─────────────────────────────────────────────────
 router.get('/analytics/filing-counts', getFilingCountsByClient);

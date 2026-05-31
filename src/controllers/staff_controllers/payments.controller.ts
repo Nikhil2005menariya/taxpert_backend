@@ -27,13 +27,23 @@ export const getAllPayments = async (req: Request, res: Response) => {
     const { data: payments, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
 
-    // Enrich with user + service via separate queries (avoids FK cache dependency)
-    const enriched = await Promise.all((payments ?? []).map(async (p: any) => {
-      const [{ data: user }, { data: svc }] = await Promise.all([
-        sc.from('users').select('first_name, last_name, email, pan').eq('id', p.user_id).single(),
-        sc.from('services').select('name, category').eq('id', p.service_id).single(),
-      ]);
-      return { ...p, user_profile: user ?? null, service: svc ?? null };
+    // Batch enrich — 2 queries regardless of row count (avoids N+1)
+    const rows = payments ?? [];
+    const uniqueUserIds    = [...new Set(rows.map((p: any) => p.user_id).filter(Boolean))]    as string[];
+    const uniqueServiceIds = [...new Set(rows.map((p: any) => p.service_id).filter(Boolean))] as string[];
+
+    const [usersRes, svcsRes] = await Promise.all([
+      uniqueUserIds.length    ? sc.from('users').select('id, first_name, last_name, email, pan').in('id', uniqueUserIds)    : Promise.resolve({ data: [] as any[] }),
+      uniqueServiceIds.length ? sc.from('services').select('id, name, category').in('id', uniqueServiceIds)                  : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const userMap = new Map<string, any>(); for (const u of usersRes.data ?? [])  userMap.set(u.id, u);
+    const svcMap  = new Map<string, any>(); for (const s of svcsRes.data  ?? [])  svcMap.set(s.id, s);
+
+    const enriched = rows.map((p: any) => ({
+      ...p,
+      user_profile: userMap.get(p.user_id)   ?? null,
+      service:      svcMap.get(p.service_id) ?? null,
     }));
 
     res.json({ data: enriched });
@@ -229,21 +239,35 @@ export const getAllInvoices = async (req: Request, res: Response) => {
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
     if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
 
-    let query = req.supabase
+    // Use service client — avoids FK-hint join issues on invoices.client_id
+    const sc = createServiceClient();
+    let query = sc
       .from('invoices')
-      .select(`
-        id, invoice_number, status, total_amount, issued_at, due_date, paid_at,
-        client:users!invoices_client_id_fkey(first_name, last_name, email),
-        service:services(name, category)
-      `)
+      .select('id, invoice_number, status, total_amount, issued_at, due_date, paid_at, client_id, service:services(name, category)')
       .order('issued_at', { ascending: false });
 
-    if (status) query = query.eq('status', status as string);
-    if (clientId) query = query.eq('client_id', clientId as string);
+    if (status)   query = query.eq('status',    status    as string);
+    if (clientId) query = query.eq('client_id', clientId  as string);
 
-    const { data, error } = await query;
+    const { data: invoices, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ data });
+
+    // Batch-fetch client profiles
+    const rows = invoices ?? [];
+    const clientIds = [...new Set(rows.map((i: any) => i.client_id).filter(Boolean))] as string[];
+    const clientRes = clientIds.length
+      ? await sc.from('users').select('id, first_name, last_name, email').in('id', clientIds)
+      : { data: [] as any[] };
+
+    const clientMap = new Map<string, any>();
+    for (const c of clientRes.data ?? []) clientMap.set(c.id, c);
+
+    const enriched = rows.map((i: any) => ({
+      ...i,
+      client: clientMap.get(i.client_id) ?? null,
+    }));
+
+    res.json({ data: enriched });
   } catch (error) {
     console.error('getAllInvoices error:', error);
     res.status(500).json({ error: 'Internal server error' });

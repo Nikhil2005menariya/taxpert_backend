@@ -101,9 +101,10 @@ export const getTaxpertDetail = async (req: Request, res: Response) => {
 
     const [profileRes, servicesRes, payoutsRes] = await Promise.all([
       service.from('users').select('*').eq('id', id).single(),
+      // Scalar select only — client_services has multiple FKs to users; FK-hint joins fail
       service
         .from('client_services')
-        .select('id, status, fiscal_year, created_at, service:services(name, slug), client:users!client_services_user_id_fkey(first_name, last_name, email)')
+        .select('id, status, fiscal_year, created_at, user_id, service_id, service:services(name, slug)')
         .eq('assigned_texpert_id', id)
         .order('created_at', { ascending: false }),
       service
@@ -120,9 +121,23 @@ export const getTaxpertDetail = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'User is not a taxpert' });
     }
 
+    // Batch-fetch client profiles for the assigned services
+    const csRows = servicesRes.data ?? [];
+    const clientIds = [...new Set(csRows.map((r: any) => r.user_id).filter(Boolean))] as string[];
+    const clientRes = clientIds.length
+      ? await service.from('users').select('id, first_name, last_name, email').in('id', clientIds)
+      : { data: [] as any[] };
+    const clientMap = new Map<string, any>();
+    for (const c of clientRes.data ?? []) clientMap.set(c.id, c);
+
+    const services = csRows.map((r: any) => ({
+      ...r,
+      client: clientMap.get(r.user_id) ?? null,
+    }));
+
     res.json({
       profile:  profileRes.data,
-      services: servicesRes.data ?? [],
+      services,
       payouts:  payoutsRes.data ?? [],
     });
   } catch (err) {

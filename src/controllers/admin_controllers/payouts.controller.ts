@@ -24,10 +24,10 @@ export const listPayouts = async (req: Request, res: Response) => {
     let query = service
       .from('texpert_payouts')
       .select(`
-        id, amount, paid_at, notes, created_at,
+        id, amount, paid_at, notes, created_at, texpert_id,
         texpert:users!texpert_payouts_texpert_id_fkey(first_name, last_name, email),
         client_service:client_services(
-          fiscal_year,
+          id, fiscal_year, user_id,
           service:services(name)
         ),
         recorded_by_user:users!texpert_payouts_recorded_by_fkey(first_name, last_name)
@@ -42,7 +42,21 @@ export const listPayouts = async (req: Request, res: Response) => {
     const { data, count, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
 
-    res.json({ data, count, page, limit });
+    // Batch-fetch client info from client_service.user_id (avoids FK-hint joins on client_services)
+    const rows = data ?? [];
+    const clientUserIds = [...new Set(rows.map((p: any) => p.client_service?.user_id).filter(Boolean))] as string[];
+    const clientRes = clientUserIds.length
+      ? await service.from('users').select('id, first_name, last_name').in('id', clientUserIds)
+      : { data: [] as any[] };
+    const clientMap = new Map<string, any>();
+    for (const c of clientRes.data ?? []) clientMap.set(c.id, c);
+
+    const enriched = rows.map((p: any) => ({
+      ...p,
+      client: p.client_service?.user_id ? (clientMap.get(p.client_service.user_id) ?? null) : null,
+    }));
+
+    res.json({ data: enriched, count, page, limit });
   } catch (err) {
     appLogger.error('listPayouts error', { err });
     res.status(500).json({ error: 'Internal server error' });

@@ -15,9 +15,31 @@ export const getPendingClientInvoices = async (req: Request, res: Response) => {
 
     if (error) return res.status(400).json({ error: error.message });
 
-    const normalized = (data ?? []).map(row => {
+    const rows = data ?? [];
+
+    // Batch-fetch invoice due_date + status for each pending service
+    const csIds = rows.map((r: any) => r.id).filter(Boolean);
+    const invoiceRes = csIds.length
+      ? await req.supabase
+          .from('invoices')
+          .select('client_service_id, due_date, status, invoice_number')
+          .in('client_service_id', csIds)
+          .in('status', ['pending', 'overdue'])
+      : { data: [] as any[] };
+
+    const invoiceMap = new Map<string, any>();
+    for (const inv of invoiceRes.data ?? []) invoiceMap.set(inv.client_service_id, inv);
+
+    const normalized = rows.map((row: any) => {
       const svc = Array.isArray(row.service) ? row.service[0] : row.service;
-      return { ...row, service: svc };
+      const inv = invoiceMap.get(row.id);
+      return {
+        ...row,
+        service:        svc,
+        invoice_due_date:    inv?.due_date    ?? null,
+        invoice_status:      inv?.status      ?? null,
+        invoice_number:      inv?.invoice_number ?? null,
+      };
     });
 
     res.json({ data: normalized });
@@ -33,7 +55,7 @@ export const getMyPayments = async (req: Request, res: Response) => {
 
     const { data, error } = await req.supabase
       .from('payments')
-      .select('id, amount, gst_rate, status, captured_at, created_at, razorpay_payment_id, client_service_id, service:services(name, category)')
+      .select('id, amount, base_amount, gst_amount, gst_rate, discount_amount, original_amount, payment_method, status, captured_at, created_at, razorpay_payment_id, client_service_id, service:services(name, category)')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
 
