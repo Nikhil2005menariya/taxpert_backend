@@ -72,7 +72,8 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
 
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
 
-    const [{ data: cs, error }, { data: commonDocsRaw }] = await Promise.all([
+    const sc = createServiceClient();
+    const [{ data: cs, error }, { data: commonDocsRaw }, { data: outputDocsRaw }] = await Promise.all([
       req.supabase
         .from('client_services')
         .select(`
@@ -91,6 +92,11 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
         .from('common_documents')
         .select('document_type, document_name')
         .eq('user_id', req.user.id),
+      sc
+        .from('output_documents')
+        .select('id, document_name, description, file_path, mime_type, uploaded_at')
+        .eq('client_service_id', id)
+        .order('uploaded_at', { ascending: false }),
     ]);
 
     if (error || !cs) return res.status(404).json({ error: 'Not found' });
@@ -137,6 +143,13 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
       notes: d.notes,
     }));
 
+    // Sign URLs for output docs
+    const outputDocs = await Promise.all((outputDocsRaw ?? []).map(async (d: any) => {
+      if (!d.file_path) return { ...d, signed_url: null };
+      const { data: signed } = await sc.storage.from('client-docs').createSignedUrl(d.file_path, 3600);
+      return { ...d, signed_url: signed?.signedUrl ?? null };
+    }));
+
     res.json({
       data: {
         clientServiceId: cs.id,
@@ -147,6 +160,7 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
         serviceSlug: svc?.slug ?? '',
         documents: docs,
         templates,
+        outputDocuments: outputDocs,
         commonDocs: (commonDocsRaw ?? []).map((d: any) => ({
           documentType: d.document_type,
           documentName: d.document_name,

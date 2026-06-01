@@ -118,7 +118,7 @@ export const getServiceDetail = async (req: Request, res: Response) => {
     const csData = cs as any;
 
     // Parallel lookups for related entities
-    const [serviceRes, clientRes, docsRes, eventsRes, tasksRes, payoutsRes] = await Promise.all([
+    const [serviceRes, clientRes, docsRes, eventsRes, tasksRes, payoutsRes, outputDocsRes] = await Promise.all([
       service.from('services').select('id, name, slug, category, price').eq('id', csData.service_id).single(),
       service.from('users').select('id, first_name, last_name, email, mobile, pan').eq('id', csData.user_id).single(),
       service.from('client_documents')
@@ -137,11 +137,23 @@ export const getServiceDetail = async (req: Request, res: Response) => {
         .eq('client_service_id', id)
         .eq('texpert_id', req.user!.id)
         .order('paid_at', { ascending: false }),
+      service.from('output_documents')
+        .select('id, document_name, description, file_path, mime_type, uploaded_by, uploaded_at')
+        .eq('client_service_id', id)
+        .order('uploaded_at', { ascending: false }),
     ]);
 
     // Sign URLs for docs that have a file_path
     const docs: any[] = docsRes.data ?? [];
     const docsWithUrls = await Promise.all(docs.map(async (doc: any) => {
+      if (!doc.file_path) return { ...doc, signed_url: null };
+      const { data: signed } = await service.storage.from('client-docs').createSignedUrl(doc.file_path, 3600);
+      return { ...doc, signed_url: signed?.signedUrl ?? null };
+    }));
+
+    // Sign URLs for output docs
+    const outputDocs: any[] = outputDocsRes.data ?? [];
+    const outputDocsWithUrls = await Promise.all(outputDocs.map(async (doc: any) => {
       if (!doc.file_path) return { ...doc, signed_url: null };
       const { data: signed } = await service.storage.from('client-docs').createSignedUrl(doc.file_path, 3600);
       return { ...doc, signed_url: signed?.signedUrl ?? null };
@@ -153,6 +165,7 @@ export const getServiceDetail = async (req: Request, res: Response) => {
         service:          serviceRes.data ?? null,
         client:           clientRes.data ?? null,
         client_documents: docsWithUrls,
+        output_documents: outputDocsWithUrls,
         service_events:   eventsRes.error?.code === '42P01' ? [] : (eventsRes.data ?? []),
         service_tasks:    tasksRes.error?.code  === '42P01' ? [] : (tasksRes.data  ?? []),
         payouts:          payoutsRes.data ?? [],

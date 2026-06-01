@@ -184,7 +184,7 @@ export const getClientServiceById = async (req: Request, res: Response) => {
     if (queryError || !data) return res.status(404).json({ error: 'Service not found' });
 
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    
+
     const canAccess = await canAccessClientServiceRecord(req.supabase, {
       viewerId: req.user.id,
       viewerRole: profile?.role as UserRole,
@@ -194,7 +194,22 @@ export const getClientServiceById = async (req: Request, res: Response) => {
 
     if (!canAccess) return res.status(403).json({ error: 'Forbidden' });
 
-    res.json({ data });
+    // Fetch output documents (texpert-generated) — use service client to bypass RLS
+    const sc = createServiceClient();
+    const { data: outputDocsRaw } = await sc
+      .from('output_documents')
+      .select('id, document_name, description, file_path, mime_type, uploaded_at')
+      .eq('client_service_id', id)
+      .order('uploaded_at', { ascending: false });
+
+    // Sign URLs for output docs
+    const outputDocuments = await Promise.all((outputDocsRaw ?? []).map(async (d: any) => {
+      if (!d.file_path) return { ...d, signed_url: null };
+      const { data: signed } = await sc.storage.from('client-docs').createSignedUrl(d.file_path, 3600);
+      return { ...d, signed_url: signed?.signedUrl ?? null };
+    }));
+
+    res.json({ data: { ...data, output_documents: outputDocuments } });
   } catch (error) {
     console.error('getClientServiceById error:', error);
     res.status(500).json({ error: 'Internal server error' });

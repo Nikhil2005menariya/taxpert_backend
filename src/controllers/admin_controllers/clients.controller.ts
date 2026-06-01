@@ -153,7 +153,7 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
     const csData = cs as any;
 
     // Parallel lookups for related entities
-    const [serviceRes, clientRes, texpertRes, docsRes] = await Promise.all([
+    const [serviceRes, clientRes, texpertRes, docsRes, outputDocsRes] = await Promise.all([
       service.from('services').select('id, name, slug, category, price').eq('id', csData.service_id).single(),
       service.from('users').select('id, first_name, last_name, email, mobile, pan').eq('id', csData.user_id).single(),
       csData.assigned_texpert_id
@@ -162,6 +162,10 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
       service.from('client_documents')
         .select('id, document_name, status, file_path, file_url, reupload_requested, reupload_note, uploaded_at, reupload_requested_at')
         .eq('client_service_id', id),
+      service.from('output_documents')
+        .select('id, document_name, description, file_path, mime_type, uploaded_by, uploaded_at')
+        .eq('client_service_id', id)
+        .order('uploaded_at', { ascending: false }),
     ]);
 
     // Fetch events/tasks/payouts in parallel; gracefully handle missing tables (code 42P01)
@@ -192,6 +196,32 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
       })
     );
 
+    // Generate signed URLs for output docs
+    const outputDocs: any[] = outputDocsRes.data ?? [];
+    const outputDocsWithUrls = await Promise.all(
+      outputDocs.map(async (doc: any) => {
+        if (!doc.file_path) return { ...doc, signed_url: null };
+        const { data: signed } = await service.storage
+          .from('client-docs')
+          .createSignedUrl(doc.file_path, 3600);
+        return { ...doc, signed_url: signed?.signedUrl ?? null };
+      })
+    );
+
+    // Enrich output docs with uploader names
+    const uploaderIds = [...new Set(outputDocs.map((d: any) => d.uploaded_by).filter(Boolean))] as string[];
+    const uploadersRes = uploaderIds.length
+      ? await service.from('users').select('id, first_name, last_name').in('id', uploaderIds)
+      : { data: [] as any[] };
+    const uploaderMap = new Map<string, string>();
+    for (const u of uploadersRes.data ?? []) {
+      uploaderMap.set(u.id, `${u.first_name} ${u.last_name}`.trim());
+    }
+    const outputDocsFinal = outputDocsWithUrls.map((d: any) => ({
+      ...d,
+      uploader_name: uploaderMap.get(d.uploaded_by) ?? 'Taxpert',
+    }));
+
     const events = eventsRes.error?.code === '42P01' ? [] : (eventsRes.data ?? []);
     const tasks  = tasksRes.error?.code  === '42P01' ? [] : (tasksRes.data  ?? []);
 
@@ -202,6 +232,7 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
         client:           clientRes.data ?? null,
         assigned_texpert: texpertRes.data ?? null,
         client_documents: docsWithUrls,
+        output_documents: outputDocsFinal,
         service_events:   events,
         service_tasks:    tasks,
         payouts:          payoutsRes.data ?? [],

@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import multer from 'multer';
+import { uploadOutputDoc, deleteOutputDoc } from '../../controllers/staff_controllers/output-docs.controller';
 import {
   getAssignedServices,
   getServiceDetail,
@@ -22,6 +24,8 @@ import {
   getTexpertOwnPayouts,
 } from '../../controllers/staff_controllers/texpert.controller';
 import { authMiddleware } from '../../middlewares/auth.middleware';
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 const router = Router();
 router.use(authMiddleware);
@@ -52,6 +56,10 @@ router.delete('/services/:id/tasks/:taskId',         deleteTexpertTask);
 
 // ── Internal notes (timeline) ────────────────────────────────
 router.post('/services/:id/notes',                   logInternalNote);
+
+// ── Output documents (texpert-generated) ────────────────────
+router.post('/services/:id/output-docs',             upload.single('file'), uploadOutputDoc);
+router.delete('/services/:id/output-docs/:docId',    deleteOutputDoc);
 
 // ── Self-assign queue ────────────────────────────────────────
 router.get('/queue',                                 getOpenQueue);
