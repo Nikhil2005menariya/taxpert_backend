@@ -3,6 +3,7 @@ import { redisConnection } from '../configs/redis.config';
 import {
   sendWorkflowStatusEmail,
   sendDocumentRequestEmail,
+  sendEmailVerificationEmail,
   sendSignupEmail,
   sendReferralRewardEmail,
   sendDocumentReminderEmail,
@@ -30,6 +31,9 @@ export const emailWorker = new Worker('email', async (job: Job) => {
       break;
     case 'document-request':
       await sendDocumentRequestEmail(payload);
+      break;
+    case 'email-verification':
+      await sendEmailVerificationEmail(payload);
       break;
     case 'signup':
       await sendSignupEmail(payload);

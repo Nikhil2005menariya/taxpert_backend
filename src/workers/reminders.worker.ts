@@ -158,6 +158,9 @@ async function processOverdueInvoices() {
 }
 
 // ── Worker ────────────────────────────────────────────────────
+// Note: stale-unconfirmed-account cleanup is no longer needed — the OTP
+// signup flow only creates auth users AFTER verification, so unconfirmed
+// users never exist in the system.
 
 export const remindersWorker = new Worker('reminders', async (_job: Job) => {
   appLogger.info('[reminders] daily run started');

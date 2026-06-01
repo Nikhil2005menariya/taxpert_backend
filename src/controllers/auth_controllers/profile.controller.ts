@@ -46,7 +46,7 @@ export const changePassword = async (req: Request, res: Response) => {
 
     if (error) return res.status(400).json({ error: error.message });
 
-    await logSessionEvent(req.user.id, 'password_change');
+    await logSessionEvent(req.user.id, 'password_change', req);
 
     res.json({ success: true });
   } catch (error: any) {

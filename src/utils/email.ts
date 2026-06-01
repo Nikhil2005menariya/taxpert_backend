@@ -107,6 +107,76 @@ export async function sendDocumentRequestEmail({
   });
 }
 
+export async function sendOtpEmail({
+  to,
+  firstName,
+  otp,
+}: {
+  to: string;
+  firstName: string;
+  otp: string;
+}) {
+  if (!resend) throw new Error('Email service not configured (RESEND_API_KEY missing)');
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${otp} — your TheTaxpert verification code`,
+    html: `
+      <div style="font-family:sans-serif;max-width:480px;margin:0 auto;color:#1a1a2e">
+        <p style="font-size:16px;margin:0 0 20px">Hi ${firstName},</p>
+        <p style="margin:0 0 24px;color:#475569">
+          Use this code to verify your TheTaxpert account. It expires in <strong>10 minutes</strong>.
+        </p>
+        <div style="background:#f9f5ec;border:2px solid #c49a3a;border-radius:12px;padding:28px;text-align:center;margin:0 0 24px">
+          <p style="margin:0 0 6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#92400e">
+            Verification Code
+          </p>
+          <p style="margin:0;font-size:40px;font-weight:800;letter-spacing:.25em;color:#1a1a2e;font-family:'Courier New',monospace">
+            ${otp}
+          </p>
+        </div>
+        <p style="font-size:13px;color:#94a3b8;margin:0">
+          This code is valid for 10 minutes. Do not share it with anyone.<br>
+          If you did not request this, ignore this email.
+        </p>
+        <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
+        <p style="font-size:12px;color:#999">TheTaxpert &middot; Tax &amp; Compliance Services</p>
+      </div>
+    `,
+  });
+}
+
+export async function sendEmailVerificationEmail({
+  to,
+  firstName,
+  verificationLink,
+}: {
+  to: string;
+  firstName: string;
+  verificationLink: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'Verify your TheTaxpert account',
+    html: `
+      <div style="font-family:sans-serif;max-width:540px;margin:0 auto;color:#1a1a2e">
+        <p style="font-size:16px">Hi ${firstName},</p>
+        <p>Thank you for creating your TheTaxpert account. Please verify your email address to get started.</p>
+        <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:16px 20px;border-radius:0 8px 8px 0;margin:20px 0">
+          <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Verify your account</p>
+          <p style="margin:0;font-size:14px;color:#555">Click the button below to confirm your email. This link expires in 24 hours.</p>
+        </div>
+        <p><a href="${verificationLink}" style="display:inline-block;background:#c49a3a;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px">Verify Email Address &rarr;</a></p>
+        <p style="font-size:13px;color:#666;margin-top:20px">If you did not create this account, you can ignore this email.</p>
+        <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
+        <p style="font-size:12px;color:#999">TheTaxpert &middot; Tax &amp; Compliance Services</p>
+      </div>
+    `,
+  });
+}
+
 export async function sendSignupEmail({
   to,
   firstName,

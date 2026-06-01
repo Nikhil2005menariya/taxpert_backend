@@ -1,17 +1,76 @@
 import { Request, Response } from 'express';
 import { signupSchema } from '../../shared/validations';
 import { createServiceClient } from '../../configs/supabase.config';
+import { redisKv } from '../../configs/redis-client';
 import { emailQueue } from '../../queues/email.queue';
+import { sendOtpEmail } from '../../utils/email';
+import { logSignupAudit } from '../../services/auth.service';
+import { appLogger } from '../../utils/logger';
 
-export const signup = async (req: Request, res: Response) => {
+// ── Constants ─────────────────────────────────────────────────
+
+const OTP_TTL_SECONDS = 600;         // 10 minutes
+const OTP_MAX_ATTEMPTS = 5;
+
+function otpKey(email: string) {
+  return `signup_otp:${email.toLowerCase()}`;
+}
+
+function generateOtp(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// ── Types ─────────────────────────────────────────────────────
+
+interface PendingSignup {
+  first_name:          string;
+  last_name:           string;
+  email:               string;
+  mobile:              string;
+  pan:                 string;
+  password:            string;
+  referral_code_used:  string | null;
+  otp:                 string;
+  attempts:            number;
+  created_at:          number;
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+
+/**
+ * Check if email, PAN, or mobile already belong to a confirmed (permanent) user.
+ * Only checks the `users` table — every row there is a confirmed user.
+ */
+async function checkConfirmedUniqueness(
+  sc: ReturnType<typeof createServiceClient>,
+  email: string,
+  pan: string,
+  mobile: string,
+): Promise<{ field: string; label: string } | null> {
+  const [emailRow, panRow, mobileRow] = await Promise.all([
+    sc.from('users').select('id').eq('email',  email).maybeSingle(),
+    sc.from('users').select('id').eq('pan',    pan).maybeSingle(),
+    sc.from('users').select('id').eq('mobile', mobile).maybeSingle(),
+  ]);
+  if (emailRow.data)  return { field: 'email',  label: 'Email address' };
+  if (panRow.data)    return { field: 'pan',    label: 'PAN' };
+  if (mobileRow.data) return { field: 'mobile', label: 'Mobile number' };
+  return null;
+}
+
+// ── POST /auth/signup-initiate ─────────────────────────────────
+// Step 1: validate fields → check uniqueness → send OTP
+// Nothing is written to the database at this stage.
+
+export const signupInitiate = async (req: Request, res: Response) => {
   try {
     const raw = {
       first_name: req.body.first_name,
-      last_name: req.body.last_name,
-      email: req.body.email,
-      mobile: req.body.mobile,
-      pan: req.body.pan?.toUpperCase(),
-      password: req.body.password,
+      last_name:  req.body.last_name,
+      email:      req.body.email,
+      mobile:     req.body.mobile,
+      pan:        req.body.pan?.toUpperCase(),
+      password:   req.body.password,
     };
 
     const referralCodeUsed = req.body.referral_code_used?.toUpperCase().trim() || null;
@@ -22,84 +81,253 @@ export const signup = async (req: Request, res: Response) => {
     }
 
     const { first_name, last_name, email, mobile, pan, password } = parsed.data;
-    const serviceClient = createServiceClient();
+    const sc = createServiceClient();
 
-    // 1. Create auth user
-    const { data: authData, error: authError } = await serviceClient.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true, // Auto confirm for now, or false if you want them to confirm
-      user_metadata: { first_name, last_name },
-    });
-
-    if (authError) return res.status(400).json({ error: authError.message });
-    if (!authData.user) return res.status(400).json({ error: 'Failed to create account' });
-
-    // 2. Generate referral code
-    const ownReferralCode = `TAXPERT-${authData.user.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
-
-    // 3. Resolve referrer
-    let referredByUserId: string | null = null;
-    if (referralCodeUsed) {
-      const { data: referrer } = await serviceClient
-        .from('users')
-        .select('id')
-        .eq('referral_code', referralCodeUsed)
-        .maybeSingle();
-      if (referrer && referrer.id !== authData.user.id) {
-        referredByUserId = referrer.id;
-      }
+    // Uniqueness check against confirmed users only
+    const conflict = await checkConfirmedUniqueness(sc, email, pan, mobile);
+    if (conflict) {
+      return res.status(400).json({
+        error: `${conflict.label} is already registered. Please sign in or use the forgot password option.`,
+      });
     }
 
-    // 4. Insert profile
-    const { error: profileError } = await serviceClient.from('users').insert({
-      id: authData.user.id,
-      first_name,
-      last_name,
+    // Check if there's already a pending OTP for this email (active within window)
+    const existing = await redisKv.get(otpKey(email));
+    if (existing) {
+      const data: PendingSignup = JSON.parse(existing);
+      const ageSec = (Date.now() - data.created_at) / 1000;
+      if (ageSec < OTP_TTL_SECONDS) {
+        // Still within window — tell them to use the code they already have
+        const remainingMin = Math.ceil((OTP_TTL_SECONDS - ageSec) / 60);
+        return res.status(400).json({
+          error:     `A verification code was already sent to ${email}. Check your inbox (valid for ${remainingMin} more minute${remainingMin !== 1 ? 's' : ''}).`,
+          code:      'OTP_ALREADY_SENT',
+          email,
+        });
+      }
+      // Expired pending — delete and proceed
+      await redisKv.del(otpKey(email));
+    }
+
+    // Generate OTP and store pending signup in Redis
+    const otp: string = generateOtp();
+    const pending: PendingSignup = {
+      first_name, last_name, email, mobile, pan, password,
+      referral_code_used: referralCodeUsed,
+      otp,
+      attempts:   0,
+      created_at: Date.now(),
+    };
+
+    await redisKv.setex(otpKey(email), OTP_TTL_SECONDS, JSON.stringify(pending));
+
+    // Send OTP email directly via Resend (synchronous — user is waiting)
+    try {
+      await sendOtpEmail({ to: email, firstName: first_name, otp });
+    } catch (emailErr: any) {
+      // Clean up Redis if email failed to send
+      await redisKv.del(otpKey(email));
+      appLogger.error('[signup-initiate] failed to send OTP email', { err: emailErr.message });
+      return res.status(500).json({ error: 'Could not send verification email. Please try again.' });
+    }
+
+    appLogger.info('[signup-initiate] OTP sent', { email });
+
+    return res.json({
+      success: true,
       email,
-      mobile,
-      pan,
-      role: 'client',
-      referral_code: ownReferralCode,
-      referral_code_used: referredByUserId ? referralCodeUsed : null,
+      message: `A 6-digit verification code has been sent to ${email}. It expires in 10 minutes.`,
+    });
+  } catch (error: any) {
+    console.error('signupInitiate error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── POST /auth/signup-verify-otp ──────────────────────────────
+// Step 2: validate OTP → create auth user + profile → return session
+
+export const signupVerifyOtp = async (req: Request, res: Response) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email?.trim() || !otp?.trim()) {
+      return res.status(400).json({ error: 'Email and OTP are required' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const key             = otpKey(normalizedEmail);
+
+    // Load pending signup from Redis
+    const raw = await redisKv.get(key);
+    if (!raw) {
+      return res.status(400).json({
+        error: 'Verification code expired or not found. Please start over.',
+        code:  'OTP_EXPIRED',
+      });
+    }
+
+    const pending: PendingSignup = JSON.parse(raw);
+
+    // Increment attempt count before checking (prevents timing attacks)
+    pending.attempts += 1;
+    const remainingAttempts = OTP_MAX_ATTEMPTS - pending.attempts;
+
+    if (pending.otp !== otp.trim()) {
+      if (pending.attempts >= OTP_MAX_ATTEMPTS) {
+        // Too many wrong attempts — invalidate
+        await redisKv.del(key);
+        return res.status(400).json({
+          error: 'Too many incorrect attempts. Please start over.',
+          code:  'OTP_MAX_ATTEMPTS',
+        });
+      }
+      // Save updated attempt count back to Redis (preserve remaining TTL)
+      const ttlLeft = await redisKv.ttl(key);
+      if (ttlLeft > 0) {
+        await redisKv.setex(key, ttlLeft, JSON.stringify(pending));
+      }
+      return res.status(400).json({
+        error:             `Incorrect code. ${remainingAttempts} attempt${remainingAttempts !== 1 ? 's' : ''} remaining.`,
+        code:              'OTP_WRONG',
+        remainingAttempts,
+      });
+    }
+
+    // OTP is valid — delete it immediately (single use)
+    await redisKv.del(key);
+
+    const sc = createServiceClient();
+
+    // Final uniqueness check (race condition guard — another user might have registered between initiate and verify)
+    const conflict = await checkConfirmedUniqueness(sc, pending.email, pending.pan, pending.mobile);
+    if (conflict) {
+      return res.status(400).json({
+        error: `${conflict.label} was registered by someone else just now. Please use a different one.`,
+      });
+    }
+
+    // Resolve referrer
+    let referredByUserId: string | null = null;
+    if (pending.referral_code_used) {
+      const { data: referrer } = await sc
+        .from('users')
+        .select('id')
+        .eq('referral_code', pending.referral_code_used)
+        .maybeSingle();
+      if (referrer) referredByUserId = referrer.id;
+    }
+
+    // Create auth user — email_confirm: true (user already verified via OTP)
+    const { data: authData, error: authError } = await sc.auth.admin.createUser({
+      email:         pending.email,
+      password:      pending.password,
+      email_confirm: true,
+      user_metadata: { first_name: pending.first_name, last_name: pending.last_name },
+    });
+
+    if (authError || !authData.user) {
+      appLogger.error('[signup-verify] createUser failed', { err: authError?.message });
+      return res.status(400).json({ error: authError?.message ?? 'Failed to create account' });
+    }
+
+    // Generate referral code
+    const ownReferralCode = `TAXPERT-${authData.user.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+
+    // Insert profile row — user is confirmed and permanent from this point
+    const { error: profileError } = await sc.from('users').insert({
+      id:                  authData.user.id,
+      first_name:          pending.first_name,
+      last_name:           pending.last_name,
+      email:               pending.email,
+      mobile:              pending.mobile,
+      pan:                 pending.pan,
+      role:                'client',
+      referral_code:       ownReferralCode,
+      referral_code_used:  referredByUserId ? pending.referral_code_used : null,
       referred_by_user_id: referredByUserId,
     });
 
-    // 5. Cleanup on profile failure
     if (profileError) {
-      await serviceClient.auth.admin.deleteUser(authData.user.id);
+      // Roll back auth user — keep system consistent
+      await sc.auth.admin.deleteUser(authData.user.id).catch(() => {});
       if (profileError.code === '23505') {
-        return res.status(400).json({ error: 'This PAN is already registered' });
+        return res.status(400).json({ error: 'PAN or mobile number is already registered.' });
       }
       return res.status(400).json({ error: profileError.message });
     }
 
-    // 6. Non-blocking side-effects
-    Promise.allSettled([
-      emailQueue.add('signup', { type: 'signup', payload: { to: email, firstName: first_name } }),
-      // trackEvent('signup', authData.user.id, { has_referral: !!referredByUserId }) // Assuming trackEvent is implemented similarly
-    ]).catch(console.error);
-
-    // 7. Login the user automatically to get tokens
-    const { data: sessionData, error: sessionError } = await serviceClient.auth.signInWithPassword({
-      email,
-      password,
+    // Create session
+    const { data: sessionData, error: sessionError } = await sc.auth.signInWithPassword({
+      email:    pending.email,
+      password: pending.password,
     });
 
     if (sessionError || !sessionData.session) {
-       return res.status(201).json({
-         success: true,
-         message: 'Account created. Please confirm your email, then sign in.',
-       });
+      // Account created but session failed — user can just log in manually
+      appLogger.warn('[signup-verify] session creation failed', { err: sessionError?.message });
+      return res.status(201).json({
+        success: true,
+        message: 'Account created successfully. Please sign in.',
+      });
     }
+
+    // Non-blocking side-effects
+    logSignupAudit(authData.user.id, pending.email, req).catch(console.error);
+    emailQueue.add('signup', {
+      type: 'signup',
+      payload: { to: pending.email, firstName: pending.first_name },
+    }).catch(console.error);
+
+    appLogger.info('[signup-verify] account created', { userId: authData.user.id, email: pending.email });
 
     return res.status(201).json({
       success: true,
       session: sessionData.session,
-      user: sessionData.user,
+      user:    sessionData.user,
     });
   } catch (error: any) {
-    console.error('Signup error:', error);
+    console.error('signupVerifyOtp error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── POST /auth/signup-resend-otp ──────────────────────────────
+// Resend a fresh OTP to the same email (within the pending window)
+
+export const signupResendOtp = async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email?.trim()) return res.status(400).json({ error: 'Email is required' });
+
+    const key = otpKey(email.trim().toLowerCase());
+    const raw = await redisKv.get(key);
+
+    if (!raw) {
+      return res.status(400).json({
+        error: 'No pending registration found. Please start the signup process again.',
+        code:  'OTP_EXPIRED',
+      });
+    }
+
+    const pending: PendingSignup = JSON.parse(raw);
+
+    // Generate a new OTP, reset attempts, reset TTL
+    pending.otp      = generateOtp();
+    pending.attempts = 0;
+    pending.created_at = Date.now();
+
+    await redisKv.setex(key, OTP_TTL_SECONDS, JSON.stringify(pending));
+
+    try {
+      await sendOtpEmail({ to: pending.email, firstName: pending.first_name, otp: pending.otp });
+    } catch (emailErr: any) {
+      appLogger.error('[signup-resend-otp] failed to send', { err: emailErr.message });
+      return res.status(500).json({ error: 'Could not resend code. Please try again.' });
+    }
+
+    return res.json({ success: true, message: 'A new verification code has been sent.' });
+  } catch (error: any) {
+    console.error('signupResendOtp error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

@@ -9,11 +9,9 @@ console.log('🚀 Starting Background Workers...');
 
 // Initialize repeatable jobs (Cron)
 async function initSchedules() {
-  // Reminders: Daily at 3:30 AM
+  // Reminders: Daily at 3:30 AM (overdue invoice checks)
   await remindersQueue.add('daily-reminders', {}, {
-    repeat: {
-      pattern: '30 3 * * *'
-    }
+    repeat: { pattern: '30 3 * * *' },
   });
 
   // SLA: Every 4 hours

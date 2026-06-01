@@ -5,7 +5,7 @@ import { createServiceClient } from '../../configs/supabase.config';
 export const logout = async (req: Request, res: Response) => {
   try {
     if (req.user?.id) {
-      await logSessionEvent(req.user.id, 'logout');
+      await logSessionEvent(req.user.id, 'logout', req);
     }
     
     // In a stateless JWT backend, logout is mostly handled client-side (removing the token).
