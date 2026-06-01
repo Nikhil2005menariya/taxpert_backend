@@ -37,24 +37,95 @@ interface PendingSignup {
 
 // ── Helpers ───────────────────────────────────────────────────
 
+type SC = ReturnType<typeof createServiceClient>;
+
+/** Find a Supabase auth user by email (paginates listUsers). */
+async function findAuthUserByEmail(sc: SC, email: string) {
+  const target = email.toLowerCase();
+  let page = 1;
+  // Paginate defensively — stop when a page returns fewer than perPage rows.
+  for (;;) {
+    const { data, error } = await sc.auth.admin.listUsers({ page, perPage: 200 });
+    if (error || !data?.users?.length) return null;
+    const match = data.users.find(u => u.email?.toLowerCase() === target);
+    if (match) return match;
+    if (data.users.length < 200) return null;
+    page += 1;
+    if (page > 50) return null; // hard safety cap (~10k users)
+  }
+}
+
+/** Permanently delete a stale/unconfirmed account from auth + users table. */
+async function purgeStaleAccount(sc: SC, userId: string, reason: string) {
+  await sc.auth.admin.deleteUser(userId).catch(() => {});
+  await Promise.resolve(sc.from('users').delete().eq('id', userId)).catch(() => {});
+  appLogger.info(`[signup] purged stale account ${userId} — ${reason}`);
+}
+
 /**
- * Check if email, PAN, or mobile already belong to a confirmed (permanent) user.
- * Only checks the `users` table — every row there is a confirmed user.
+ * Resolve uniqueness for email / pan / mobile.
+ *
+ * A `users` row is only a TRUE blocker if its matching Supabase auth user
+ * has email_confirmed_at set. If the auth user is unconfirmed (a leftover from
+ * an abandoned signup or the legacy flow) — or missing entirely — the stale
+ * record is purged and the field is treated as available.
+ *
+ * Returns a blocking conflict, or null if clear.
  */
-async function checkConfirmedUniqueness(
-  sc: ReturnType<typeof createServiceClient>,
+async function resolveUniqueness(
+  sc: SC,
   email: string,
   pan: string,
   mobile: string,
 ): Promise<{ field: string; label: string } | null> {
+  // Resolve a single users-table row → confirmed? stale? gone?
+  async function evaluate(userId: string, label: string): Promise<{ field: string; label: string } | null> {
+    const { data: authData } = await sc.auth.admin.getUserById(userId);
+    const authUser = authData?.user;
+    if (!authUser) {
+      // Profile row with no auth user — orphan. Remove the dangling row.
+      await Promise.resolve(sc.from('users').delete().eq('id', userId)).catch(() => {});
+      appLogger.info(`[signup] removed orphan users row ${userId} (no auth user)`);
+      return null;
+    }
+    if (authUser.email_confirmed_at) {
+      return { field: label.toLowerCase(), label };
+    }
+    // Unconfirmed leftover → purge and treat field as available
+    await purgeStaleAccount(sc, userId, `unconfirmed ${label}`);
+    return null;
+  }
+
   const [emailRow, panRow, mobileRow] = await Promise.all([
     sc.from('users').select('id').eq('email',  email).maybeSingle(),
     sc.from('users').select('id').eq('pan',    pan).maybeSingle(),
     sc.from('users').select('id').eq('mobile', mobile).maybeSingle(),
   ]);
-  if (emailRow.data)  return { field: 'email',  label: 'Email address' };
-  if (panRow.data)    return { field: 'pan',    label: 'PAN' };
-  if (mobileRow.data) return { field: 'mobile', label: 'Mobile number' };
+
+  if (emailRow.data) {
+    const c = await evaluate(emailRow.data.id, 'Email address');
+    if (c) return c;
+  }
+  if (panRow.data) {
+    const c = await evaluate(panRow.data.id, 'PAN');
+    if (c) return c;
+  }
+  if (mobileRow.data) {
+    const c = await evaluate(mobileRow.data.id, 'Mobile number');
+    if (c) return c;
+  }
+
+  // Edge case: an unconfirmed auth user exists for this email WITHOUT a users
+  // row (e.g. legacy flow where profile insert failed, or a rolled-back verify).
+  // It would block createUser later — purge it now if unconfirmed.
+  const authByEmail = await findAuthUserByEmail(sc, email);
+  if (authByEmail) {
+    if (authByEmail.email_confirmed_at) {
+      return { field: 'email', label: 'Email address' };
+    }
+    await purgeStaleAccount(sc, authByEmail.id, 'unconfirmed auth user (no profile)');
+  }
+
   return null;
 }
 
@@ -83,8 +154,8 @@ export const signupInitiate = async (req: Request, res: Response) => {
     const { first_name, last_name, email, mobile, pan, password } = parsed.data;
     const sc = createServiceClient();
 
-    // Uniqueness check against confirmed users only
-    const conflict = await checkConfirmedUniqueness(sc, email, pan, mobile);
+    // Uniqueness check — purges stale unconfirmed leftovers automatically
+    const conflict = await resolveUniqueness(sc, email, pan, mobile);
     if (conflict) {
       return res.status(400).json({
         error: `${conflict.label} is already registered. Please sign in or use the forgot password option.`,
@@ -198,8 +269,8 @@ export const signupVerifyOtp = async (req: Request, res: Response) => {
 
     const sc = createServiceClient();
 
-    // Final uniqueness check (race condition guard — another user might have registered between initiate and verify)
-    const conflict = await checkConfirmedUniqueness(sc, pending.email, pending.pan, pending.mobile);
+    // Final uniqueness check (race guard — purges stale leftovers, blocks only on confirmed users)
+    const conflict = await resolveUniqueness(sc, pending.email, pending.pan, pending.mobile);
     if (conflict) {
       return res.status(400).json({
         error: `${conflict.label} was registered by someone else just now. Please use a different one.`,

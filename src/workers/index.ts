@@ -9,6 +9,21 @@ console.log('🚀 Starting Background Workers...');
 
 // Initialize repeatable jobs (Cron)
 async function initSchedules() {
+  // Remove the retired 'cleanup-unverified' repeatable if it lingers in Redis
+  // from a previous deploy. BullMQ persists repeatables, so a removed .add()
+  // call alone does not delete an already-registered schedule.
+  try {
+    const repeatables = await remindersQueue.getRepeatableJobs();
+    for (const r of repeatables) {
+      if (r.name === 'cleanup-unverified') {
+        await remindersQueue.removeRepeatableByKey(r.key);
+        console.log('🧹 Removed retired repeatable job: cleanup-unverified');
+      }
+    }
+  } catch (err) {
+    console.error('Failed to prune retired repeatables:', err);
+  }
+
   // Reminders: Daily at 3:30 AM (overdue invoice checks)
   await remindersQueue.add('daily-reminders', {}, {
     repeat: { pattern: '30 3 * * *' },

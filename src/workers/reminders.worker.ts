@@ -158,9 +158,11 @@ async function processOverdueInvoices() {
 }
 
 // ── Worker ────────────────────────────────────────────────────
-// Note: stale-unconfirmed-account cleanup is no longer needed — the OTP
-// signup flow only creates auth users AFTER verification, so unconfirmed
-// users never exist in the system.
+// Note: there is no stale-account cleanup here. The OTP signup flow keeps
+// unverified registrations entirely in Redis (self-expiring), and only
+// commits to the database after verification — so unconfirmed users never
+// exist in Postgres. The synchronous resolveUniqueness() check in the signup
+// controller is the only backstop needed for any rare orphan.
 
 export const remindersWorker = new Worker('reminders', async (_job: Job) => {
   appLogger.info('[reminders] daily run started');
