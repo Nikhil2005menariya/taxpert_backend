@@ -164,9 +164,28 @@ async function processOverdueInvoices() {
 // exist in Postgres. The synchronous resolveUniqueness() check in the signup
 // controller is the only backstop needed for any rare orphan.
 
+// ── Notification retention ────────────────────────────────────
+// Delete notifications that have been READ for more than 3 days. Unread
+// notifications are kept indefinitely so nothing is missed.
+async function cleanupReadNotifications() {
+  const db = createServiceClient();
+  const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const { error, count } = await db
+    .from('notifications')
+    .delete({ count: 'exact' })
+    .eq('is_read', true)
+    .lt('read_at', cutoff);
+  if (error) {
+    appLogger.error('[reminders] notification cleanup failed', { err: error.message });
+  } else {
+    appLogger.info(`[reminders] cleaned up ${count ?? 0} read notifications older than 3 days`);
+  }
+}
+
 export const remindersWorker = new Worker('reminders', async (_job: Job) => {
   appLogger.info('[reminders] daily run started');
   await processOverdueInvoices();
+  await cleanupReadNotifications();
 }, { connection: redisConnection });
 
 remindersWorker.on('completed', () => {

@@ -1,5 +1,58 @@
 import { createServiceClient } from '../configs/supabase.config';
 import { canAccessClientServiceRecord } from './service-access';
+import { emailQueue } from '../queues/email.queue';
+import { createNotification, notifyAdmins } from './notifications';
+
+/**
+ * Notify the client that their service has entered the assignment queue.
+ * Skips silently if the service already has an assigned Taxpert (no point telling
+ * them it's "awaiting assignment"). Non-blocking — never throws to the caller.
+ */
+export async function notifyServiceQueued(clientServiceId: string) {
+  try {
+    const supabase = createServiceClient();
+    const { data: cs } = await supabase
+      .from('client_services')
+      .select('user_id, service_id, assigned_texpert_id')
+      .eq('id', clientServiceId)
+      .single();
+    if (!cs || cs.assigned_texpert_id) return;
+
+    const [{ data: client }, { data: svc }] = await Promise.all([
+      supabase.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+      supabase.from('services').select('name').eq('id', cs.service_id).single(),
+    ]);
+    if (!client?.email) return;
+
+    const serviceName = svc?.name ?? 'your service';
+    await emailQueue.add('service-queued', {
+      type:    'service-queued',
+      payload: {
+        to:          client.email,
+        firstName:   client.first_name ?? 'there',
+        serviceName,
+      },
+    });
+
+    void createNotification({
+      userId: cs.user_id,
+      type:   'service_queued',
+      title:  `${serviceName} request received`,
+      body:   'Your request is queued — a Taxpert will be assigned shortly.',
+      link:   `/client/services/${clientServiceId}`,
+    });
+
+    // Admins: a new service needs a Taxpert assigned. (Only when still unassigned.)
+    void notifyAdmins({
+      type:  'service_queued',
+      title: `New service in queue · ${serviceName}`,
+      body:  'A service is awaiting Taxpert assignment.',
+      link:  `/admin/client-services/${clientServiceId}`,
+    });
+  } catch {
+    /* non-blocking — queue notification is best-effort */
+  }
+}
 
 type WorkspaceTaskSeed = {
   title: string;
@@ -20,7 +73,7 @@ export function buildFallbackTasks(input: {
   );
   const hasReviewableDocs = input.docs.some((doc) => doc.status === 'uploaded');
   const docsComplete = input.docs.length > 0 && !hasPendingDocs;
-  const paymentDone = input.paymentStatus === 'paid' || input.status !== 'invoice_pending';
+  const paymentDone = input.paymentStatus === 'paid' || input.status !== 'payment';
 
   return [
     {
@@ -55,11 +108,11 @@ export function buildFallbackTasks(input: {
       sort_order: 3,
     },
     {
-      title: 'Confirm invoice payment',
+      title: 'Confirm payment',
       description: 'Client payment confirmation before final closure.',
       task_type: 'invoice_payment',
       scope: 'client',
-      status: paymentDone ? 'done' : input.status === 'invoice_pending' ? 'in_progress' : 'blocked',
+      status: paymentDone ? 'done' : input.status === 'payment' ? 'in_progress' : 'blocked',
       sort_order: 4,
     },
     {

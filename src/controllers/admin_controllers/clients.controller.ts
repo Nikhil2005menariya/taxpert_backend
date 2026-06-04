@@ -4,6 +4,7 @@ import { isAdminRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
 import { emailQueue } from '../../queues/email.queue';
+import { notifyClientForService, notifyTexpertForService } from '../../utils/notifications';
 
 // Helper: enqueue an email and never throw to the caller
 function enqueueEmail(type: string, payload: Record<string, unknown>) {
@@ -17,6 +18,80 @@ async function assertAdmin(req: Request, res: Response): Promise<boolean> {
   if (!isAdminRole(data?.role as UserRole)) { res.status(403).json({ error: 'Forbidden' }); return false; }
   return true;
 }
+
+export const listClientServices = async (req: Request, res: Response) => {
+  try {
+    if (!await assertAdmin(req, res)) return;
+    const sc = createServiceClient();
+
+    const page   = Math.max(1, parseInt(String(req.query.page  ?? '1'),  10));
+    const limit  = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10)));
+    const search = String(req.query.search ?? '').trim();
+    const status = String(req.query.status ?? '').trim();
+
+    // Resolve matching user IDs from search term before the main query
+    let clientIdFilter:  string[] | null = null;
+    let texpertIdFilter: string[] | null = null;
+
+    if (search) {
+      const [clientRes, texpertRes] = await Promise.all([
+        sc.from('users').select('id').eq('role', 'client')
+          .or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,pan.ilike.%${search}%`),
+        sc.from('users').select('id').neq('role', 'client')
+          .or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%`),
+      ]);
+      clientIdFilter  = (clientRes.data  ?? []).map((u: any) => u.id);
+      texpertIdFilter = (texpertRes.data ?? []).map((u: any) => u.id);
+
+      // No users matched the search term — return empty immediately
+      if (clientIdFilter.length === 0 && texpertIdFilter.length === 0) {
+        return res.json({ data: [], count: 0, page, limit });
+      }
+    }
+
+    let query = sc
+      .from('client_services')
+      .select('id, status, payment_status, fiscal_year, created_at, updated_at, user_id, service_id, assigned_texpert_id', { count: 'exact' })
+      .order('updated_at', { ascending: false })
+      .range((page - 1) * limit, page * limit - 1);
+
+    if (status) query = query.eq('status', status);
+
+    if (clientIdFilter !== null || texpertIdFilter !== null) {
+      const parts: string[] = [];
+      if (clientIdFilter  && clientIdFilter.length  > 0) parts.push(`user_id.in.(${clientIdFilter.join(',')})`);
+      if (texpertIdFilter && texpertIdFilter.length > 0) parts.push(`assigned_texpert_id.in.(${texpertIdFilter.join(',')})`);
+      if (parts.length > 0) query = (query as any).or(parts.join(','));
+    }
+
+    const { data: rows, count, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    const allRows = (rows ?? []) as any[];
+    const userIds    = [...new Set(allRows.flatMap((r: any) => [r.user_id, r.assigned_texpert_id].filter(Boolean)))] as string[];
+    const serviceIds = [...new Set(allRows.map((r: any) => r.service_id).filter(Boolean))] as string[];
+
+    const [usersRes, servicesRes] = await Promise.all([
+      userIds.length    ? sc.from('users').select('id, first_name, last_name, email, pan').in('id', userIds)       : { data: [], error: null },
+      serviceIds.length ? sc.from('services').select('id, name, slug, category').in('id', serviceIds)             : { data: [], error: null },
+    ]);
+
+    const userMap    = new Map<string, any>((usersRes.data    ?? []).map((u: any) => [u.id, u]));
+    const serviceMap = new Map<string, any>((servicesRes.data ?? []).map((s: any) => [s.id, s]));
+
+    const data = allRows.map((row: any) => ({
+      ...row,
+      client:           userMap.get(row.user_id)                                          ?? null,
+      assigned_texpert: row.assigned_texpert_id ? userMap.get(row.assigned_texpert_id)   ?? null : null,
+      service:          serviceMap.get(row.service_id)                                    ?? null,
+    }));
+
+    res.json({ data, count, page, limit });
+  } catch (err) {
+    appLogger.error('listClientServices error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
 
 export const listClients = async (req: Request, res: Response) => {
   try {
@@ -168,8 +243,8 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
         .order('uploaded_at', { ascending: false }),
     ]);
 
-    // Fetch events/tasks/payouts in parallel; gracefully handle missing tables (code 42P01)
-    const [eventsRes, tasksRes, payoutsRes] = await Promise.all([
+    // Fetch events/tasks in parallel; gracefully handle missing tables (code 42P01)
+    const [eventsRes, tasksRes] = await Promise.all([
       service.from('service_events')
         .select('id, event_type, message, created_at, actor_user_id, metadata')
         .eq('client_service_id', id)
@@ -178,10 +253,6 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
         .select('id, title, description, task_type, scope, status, owner_user_id, due_at, completed_at, sort_order')
         .eq('client_service_id', id)
         .order('sort_order'),
-      service.from('texpert_payouts')
-        .select('id, amount, paid_at, notes')
-        .eq('client_service_id', id)
-        .order('paid_at', { ascending: false }),
     ]);
 
     // Generate signed URLs for documents
@@ -235,7 +306,6 @@ export const getAdminServiceDetail = async (req: Request, res: Response) => {
         output_documents: outputDocsFinal,
         service_events:   events,
         service_tasks:    tasks,
-        payouts:          payoutsRes.data ?? [],
       },
     });
   } catch (err) {
@@ -252,13 +322,31 @@ export const adminUpdateService = async (req: Request, res: Response) => {
 
     const ALLOWED_STATUSES = [
       'documents_required', 'documents_received', 'in_progress',
-      'under_review', 'invoice_pending', 'completed', 'on_hold', 'cancelled',
+      'under_review', 'payment', 'completed', 'on_hold', 'cancelled',
     ];
+
+    const service = createServiceClient();
+
+    // Snapshot the prior state once — used for guards and to detect real changes worth notifying.
+    const { data: prev } = await service
+      .from('client_services')
+      .select('user_id, service_id, status, payment_status, assigned_texpert_id, is_blocked, pinned_message')
+      .eq('id', id)
+      .single();
+    if (!prev) return res.status(404).json({ error: 'Service not found' });
 
     const updatePayload: Record<string, unknown> = {};
     if (status !== undefined) {
       if (!ALLOWED_STATUSES.includes(status)) {
         return res.status(400).json({ error: `Invalid status. Allowed: ${ALLOWED_STATUSES.join(', ')}` });
+      }
+      // Workflow progress requires an assigned Taxpert — nobody is responsible for the work yet.
+      if (!prev.assigned_texpert_id) {
+        return res.status(400).json({ error: 'Assign a Taxpert before updating the workflow status.' });
+      }
+      // A service can only be completed once payment is confirmed.
+      if (status === 'completed' && prev.payment_status !== 'paid') {
+        return res.status(400).json({ error: 'Cannot complete — payment not yet confirmed' });
       }
       updatePayload.status = status;
       updatePayload.status_updated_at = new Date().toISOString();
@@ -278,11 +366,17 @@ export const adminUpdateService = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Nothing to update' });
     }
 
-    const service = createServiceClient();
     const { error } = await service.from('client_services').update(updatePayload).eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
 
-    if (status) {
+    // ── Determine which client-facing changes actually happened ──────────────
+    const statusChanged = status !== undefined && status !== prev.status;
+    const blockChanged  = is_blocked !== undefined && !!is_blocked !== !!prev.is_blocked;
+    const pinnedText    = (pinned_message ?? '').trim();
+    const pinnedChanged = pinned_message !== undefined && pinnedText.length > 0
+      && pinnedText !== (prev.pinned_message ?? '').trim();
+
+    if (statusChanged) {
       await service.from('service_events').insert({
         client_service_id: id,
         event_type:        'status_changed',
@@ -290,27 +384,67 @@ export const adminUpdateService = async (req: Request, res: Response) => {
         message:           `Status updated to ${status} by admin`,
         metadata:          { status, notes },
       });
+    }
 
-      // Email client about status change
+    // Notify the client about the changes that matter to them (non-blocking).
+    if (statusChanged || blockChanged || pinnedChanged) {
       try {
-        const { data: cs } = await service
-          .from('client_services')
-          .select('user_id, service_id')
-          .eq('id', id)
-          .single();
-        if (cs) {
-          const [{ data: client }, { data: svc }] = await Promise.all([
-            service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
-            service.from('services').select('name').eq('id', cs.service_id).single(),
-          ]);
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', prev.user_id).single(),
+          service.from('services').select('name').eq('id', prev.service_id).single(),
+        ]);
+        const serviceName = svc?.name ?? 'your service';
+        if (statusChanged) {
           if (client?.email) {
             enqueueEmail('workflow-status', {
-              to:          client.email,
-              firstName:   client.first_name,
-              serviceName: svc?.name ?? 'your service',
-              status,
+              to: client.email, firstName: client.first_name, serviceName, status,
             });
           }
+          void notifyClientForService(prev.user_id, id, {
+            type: 'status_changed',
+            title: `${serviceName}: status updated`,
+            body: `Now "${String(status).replace(/_/g, ' ')}".`,
+            metadata: { status },
+          });
+          // Keep the assigned texpert in the loop on admin-driven status changes.
+          void notifyTexpertForService(prev.assigned_texpert_id, id, {
+            type: 'admin_status_changed',
+            title: `Admin updated status · ${serviceName}`,
+            body: `Status is now "${String(status).replace(/_/g, ' ')}".`,
+            metadata: { status },
+          });
+        }
+        if (blockChanged) {
+          if (client?.email) {
+            enqueueEmail('service-hold', {
+              to: client.email, firstName: client.first_name, serviceName,
+              blocked: !!is_blocked,
+              reason: is_blocked ? (blocked_reason ?? null) : null,
+            });
+          }
+          void notifyClientForService(prev.user_id, id, {
+            type: 'service_hold',
+            title: is_blocked ? `${serviceName} paused` : `${serviceName} resumed`,
+            body: is_blocked ? (blocked_reason ?? 'Your service has been temporarily paused.') : 'Your service is active again.',
+          });
+          void notifyTexpertForService(prev.assigned_texpert_id, id, {
+            type: 'admin_service_hold',
+            title: is_blocked ? `Admin paused · ${serviceName}` : `Admin resumed · ${serviceName}`,
+            body: is_blocked ? (blocked_reason ? `Reason: ${blocked_reason}` : 'Service paused by admin.') : 'Service resumed by admin.',
+          });
+        }
+        if (pinnedChanged) {
+          if (client?.email) {
+            enqueueEmail('pinned-message', {
+              to: client.email, firstName: client.first_name, serviceName,
+              message: pinnedText, clientServiceId: id,
+            });
+          }
+          void notifyClientForService(prev.user_id, id, {
+            type: 'pinned_message',
+            title: `New message · ${serviceName}`,
+            body: pinnedText.length > 90 ? pinnedText.slice(0, 90) + '…' : pinnedText,
+          });
         }
       } catch (e) {
         appLogger.warn('adminUpdateService email lookup failed', { err: (e as Error).message });
@@ -477,14 +611,20 @@ export const adminAddDocSlot = async (req: Request, res: Response) => {
           service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
           service.from('services').select('name').eq('id', cs.service_id).single(),
         ]);
+        const serviceName = svc?.name ?? 'your service';
         if (client?.email) {
           enqueueEmail('additional-doc-added', {
             to:          client.email,
             firstName:   client.first_name,
-            serviceName: svc?.name ?? 'your service',
+            serviceName,
             docName:     document_name.trim(),
           });
         }
+        void notifyClientForService(cs.user_id, id, {
+          type: 'document_added',
+          title: `New document requested · ${serviceName}`,
+          body: `Please upload: ${document_name.trim()}`,
+        });
       }
     } catch (e) {
       appLogger.warn('adminAddDocSlot email lookup failed', { err: (e as Error).message });
@@ -493,86 +633,6 @@ export const adminAddDocSlot = async (req: Request, res: Response) => {
     res.status(201).json({ data });
   } catch (err) {
     appLogger.error('adminAddDocSlot error', { err });
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-export const adminRecordPayoutForService = async (req: Request, res: Response) => {
-  try {
-    if (!await assertAdmin(req, res)) return;
-    const { id } = req.params;
-    const { amount_rupees, notes } = req.body;
-
-    const amount = Number(amount_rupees);
-    if (!amount_rupees || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Valid amount_rupees is required' });
-    }
-
-    const service = createServiceClient();
-
-    const { data: cs } = await service
-      .from('client_services')
-      .select('assigned_texpert_id')
-      .eq('id', id)
-      .single();
-
-    if (!cs?.assigned_texpert_id) {
-      return res.status(400).json({ error: 'No taxpert is assigned to this service' });
-    }
-
-    const amountPaise = Math.round(amount * 100);
-
-    const { error } = await service.from('texpert_payouts').insert({
-      texpert_id:        cs.assigned_texpert_id,
-      client_service_id: id,
-      amount:            amountPaise,
-      recorded_by:       req.user!.id,
-      notes:             notes?.trim() ?? null,
-    });
-
-    if (error) return res.status(400).json({ error: error.message });
-
-    await service.from('service_events').insert({
-      client_service_id: id,
-      event_type:        'payout_recorded',
-      actor_user_id:     req.user!.id,
-      message:           `Payout of ₹${amount.toLocaleString('en-IN')} recorded`,
-      metadata:          { amount_rupees: amount, notes: notes?.trim() ?? null },
-    });
-
-    await writeAudit({
-      actorId:    req.user!.id,
-      action:     'admin_record_payout_service',
-      targetType: 'client_service',
-      targetId:   id,
-      metadata:   { amount_rupees: amount, texpert_id: cs.assigned_texpert_id },
-    });
-
-    // Email texpert about the payout
-    try {
-      const [{ data: texpert }, { data: cs2 }] = await Promise.all([
-        service.from('users').select('email, first_name').eq('id', cs.assigned_texpert_id).single(),
-        service.from('client_services').select('service_id').eq('id', id).single(),
-      ]);
-      const { data: svc } = cs2
-        ? await service.from('services').select('name').eq('id', cs2.service_id).single()
-        : { data: null };
-      if (texpert?.email) {
-        enqueueEmail('payout-recorded', {
-          to:          texpert.email,
-          firstName:   texpert.first_name,
-          serviceName: svc?.name ?? 'a service',
-          amountPaise: amountPaise,
-          notes:       notes?.trim() ?? null,
-        });
-      }
-    } catch (e) {
-      appLogger.warn('adminRecordPayoutForService email lookup failed', { err: (e as Error).message });
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    appLogger.error('adminRecordPayoutForService error', { err });
     res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -671,6 +731,14 @@ export const adminUpdateDocStatus = async (req: Request, res: Response) => {
             });
           }
         }
+        const svcName = svc?.name ?? 'your service';
+        const noteMap = {
+          approve: { type: 'document_approved', title: `Document approved · ${svcName}`, body: `${doc.document_name} was approved.` },
+          reject:  { type: 'document_rejected', title: `Document rejected · ${svcName}`, body: `${doc.document_name} was rejected${note ? `: ${note}` : '.'}` },
+          reupload:{ type: 'document_reupload', title: `Re-upload requested · ${svcName}`, body: `Please re-upload ${doc.document_name}${note ? `: ${note}` : '.'}` },
+        } as const;
+        const n = noteMap[action as 'approve' | 'reject' | 'reupload'];
+        if (n) void notifyClientForService(cs.user_id, id, n);
       }
     } catch (e) {
       appLogger.warn('adminUpdateDocStatus email lookup failed', { err: (e as Error).message });

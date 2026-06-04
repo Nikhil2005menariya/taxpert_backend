@@ -3,8 +3,6 @@ import { Router } from 'express';
 import {
   getAllPayments,
   getPaymentStats,
-  getAllServicesWithPrices,
-  updateServicePrice,
   getAllInvoices,
   getInvoiceSettings,
   updateInvoiceSettings,
@@ -17,8 +15,6 @@ router.use(authMiddleware);
 // Payments admin
 router.get('/admin/all',                       getAllPayments);
 router.get('/admin/stats',                     getPaymentStats);
-router.get('/admin/services-prices',           getAllServicesWithPrices);
-router.patch('/admin/services-prices/:id',     updateServicePrice);
 
 // Invoices admin
 router.get('/admin/invoices',                  getAllInvoices);

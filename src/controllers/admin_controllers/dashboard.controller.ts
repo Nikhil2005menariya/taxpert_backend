@@ -19,12 +19,16 @@ export const getDashboardStats = async (req: Request, res: Response) => {
     const now = new Date();
     const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-    // ── Run all top-level queries in parallel ──────────────────────────────────
+    // Start of 12-month window for the revenue trend chart
+    const twelveMonthsAgo = new Date(now);
+    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
+    twelveMonthsAgo.setDate(1);
+    twelveMonthsAgo.setHours(0, 0, 0, 0);
+
     const [
-      // Revenue rows — fetch raw and sum in JS (same pattern as getPaymentStats)
       revAllRes,
       revMonthRes,
-      failedRes,
+      monthlyPayRes,
 
       pipelineDocsRequired,
       pipelineDocsReceived,
@@ -37,28 +41,27 @@ export const getDashboardStats = async (req: Request, res: Response) => {
       queueOpenRes,
       queueTopRes,
 
-      overdueRes,
-
-      recentPayRes,
-
+      recentInquiriesRes,
       texpertUsersRes,
-
       newClientsRes,
       totalClientsRes,
     ] = await Promise.all([
-      // Revenue — all captured (amount + gst_amount for totals)
-      service.from('payments').select('amount, gst_amount').eq('status', 'captured'),
-      // Revenue — this month captured
+      // Revenue totals
+      service.from('payments').select('amount').eq('status', 'captured'),
       service.from('payments').select('amount').eq('status', 'captured').gte('captured_at', firstOfMonth),
-      // Failed count
-      service.from('payments').select('*', { count: 'exact', head: true }).eq('status', 'failed'),
+
+      // Monthly revenue for line chart (last 12 months)
+      service.from('payments')
+        .select('amount, captured_at')
+        .eq('status', 'captured')
+        .gte('captured_at', twelveMonthsAgo.toISOString()),
 
       // Pipeline status counts
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'documents_required'),
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'documents_received'),
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'under_review'),
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'in_progress'),
-      service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'invoice_pending'),
+      service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'payment'),
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'completed'),
       service.from('client_services').select('*', { count: 'exact', head: true }).eq('status', 'cancelled'),
 
@@ -70,52 +73,61 @@ export const getDashboardStats = async (req: Request, res: Response) => {
         .order('priority', { ascending: false })
         .limit(5),
 
-      // Overdue invoices
-      service.from('invoices').select('*', { count: 'exact', head: true }).eq('status', 'overdue'),
-
-      // Recent payments
-      service.from('payments')
-        .select('id, amount, payment_method, captured_at, user_id, service_id')
-        .eq('status', 'captured')
-        .order('captured_at', { ascending: false, nullsFirst: false })
+      // Recent pending consultation inquiries
+      service.from('consultation_requests')
+        .select('id, name, phone, email, service_needed, created_at')
+        .eq('is_consulted', false)
+        .order('created_at', { ascending: false })
         .limit(5),
 
-      // Texpert users
+      // Texpert users for workload
       service.from('users')
         .select('id, first_name, last_name, role')
         .in('role', ['expert', 'ca'])
         .eq('is_active', true),
 
-      // New clients this month
+      // Client counts
       service.from('users').select('*', { count: 'exact', head: true }).eq('role', 'client').gte('created_at', firstOfMonth),
-      // Total clients
       service.from('users').select('*', { count: 'exact', head: true }).eq('role', 'client'),
     ]);
 
-    // ── Revenue (JS-side sum, same as getPaymentStats) ────────────────────────
-    const allCapt  = revAllRes.data   ?? [];
-    const monthCapt = revMonthRes.data ?? [];
+    // ── Revenue ───────────────────────────────────────────────────────────────
     const revenue = {
-      total:       allCapt.reduce((s: number, p: any) => s + (p.amount ?? 0), 0),
-      thisMonth:   monthCapt.reduce((s: number, p: any) => s + (p.amount ?? 0), 0),
-      gst:         allCapt.reduce((s: number, p: any) => s + (p.gst_amount ?? 0), 0),
-      failedCount: failedRes.count ?? 0,
+      total:     (revAllRes.data   ?? []).reduce((s: number, p: any) => s + (p.amount ?? 0), 0),
+      thisMonth: (revMonthRes.data ?? []).reduce((s: number, p: any) => s + (p.amount ?? 0), 0),
     };
+
+    // ── Revenue by month (last 12) ────────────────────────────────────────────
+    const monthAmountMap: Record<string, number> = {};
+    for (const p of (monthlyPayRes.data ?? []) as any[]) {
+      if (!p.captured_at) continue;
+      const key = (p.captured_at as string).slice(0, 7); // "2025-06"
+      monthAmountMap[key] = (monthAmountMap[key] ?? 0) + (p.amount ?? 0);
+    }
+
+    const revenueByMonth: { key: string; label: string; amount: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() - i);
+      const key   = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const label = d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+      revenueByMonth.push({ key, label, amount: monthAmountMap[key] ?? 0 });
+    }
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
     const pipeline: Record<string, number> = {
-      documents_required:  pipelineDocsRequired.count  ?? 0,
-      documents_received:  pipelineDocsReceived.count  ?? 0,
-      under_review:        pipelineUnderReview.count   ?? 0,
-      in_progress:         pipelineInProgress.count    ?? 0,
-      invoice_pending:     pipelineInvoicePending.count ?? 0,
-      completed:           pipelineCompleted.count     ?? 0,
-      cancelled:           pipelineCancelled.count     ?? 0,
+      documents_required: pipelineDocsRequired.count  ?? 0,
+      documents_received: pipelineDocsReceived.count  ?? 0,
+      under_review:       pipelineUnderReview.count   ?? 0,
+      in_progress:        pipelineInProgress.count    ?? 0,
+      payment:            pipelineInvoicePending.count ?? 0,
+      completed:          pipelineCompleted.count      ?? 0,
+      cancelled:          pipelineCancelled.count      ?? 0,
     };
 
-    // ── Queue — batch-fetch client names (FK-hint join on client_services unsafe) ─
+    // ── Queue — batch-fetch client names ──────────────────────────────────────
     const rawQueue = queueTopRes.data ?? [];
-    const queueUserIds = [...new Set(rawQueue.map((q: any) => q.client_service?.user_id).filter(Boolean))] as string[];
+    const queueUserIds = [...new Set((rawQueue as any[]).map((q: any) => q.client_service?.user_id).filter(Boolean))] as string[];
     const queueClientsRes = queueUserIds.length
       ? await service.from('users').select('id, first_name, last_name').in('id', queueUserIds)
       : { data: [] as any[] };
@@ -123,56 +135,25 @@ export const getDashboardStats = async (req: Request, res: Response) => {
     for (const c of queueClientsRes.data ?? []) {
       queueClientMap.set(c.id, `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim());
     }
-    const queueItems = rawQueue.map((q: any) => ({
+    const queueItems = (rawQueue as any[]).map((q: any) => ({
       ...q,
-      client_name: q.client_service?.user_id ? (queueClientMap.get(q.client_service.user_id) ?? '—') : '—',
-      service_name: Array.isArray(q.client_service?.service) ? q.client_service.service[0]?.name : q.client_service?.service?.name ?? '—',
+      client_name:  q.client_service?.user_id ? (queueClientMap.get(q.client_service.user_id) ?? '—') : '—',
+      service_name: Array.isArray(q.client_service?.service)
+        ? q.client_service.service[0]?.name
+        : (q.client_service?.service?.name ?? '—'),
     }));
 
-    const queue = {
-      openCount: queueOpenRes.count ?? 0,
-      topItems:  queueItems,
-    };
-
-    // ── Recent Payments — enrich with user name + service name ────────────────
-    const rawPayments = recentPayRes.data ?? [];
-    const paymentUserIds    = [...new Set(rawPayments.map((p: any) => p.user_id).filter(Boolean))];
-    const paymentServiceIds = [...new Set(rawPayments.map((p: any) => p.service_id).filter(Boolean))];
-
-    const [payUsersRes, payServicesRes] = await Promise.all([
-      paymentUserIds.length
-        ? service.from('users').select('id, first_name, last_name').in('id', paymentUserIds as string[])
-        : Promise.resolve({ data: [] }),
-      paymentServiceIds.length
-        ? service.from('services').select('id, name').in('id', paymentServiceIds as string[])
-        : Promise.resolve({ data: [] }),
-    ]);
-
-    const userMap: Record<string, string> = {};
-    for (const u of (payUsersRes.data ?? []) as any[]) {
-      userMap[u.id] = `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim() || 'Unknown';
-    }
-    const serviceMap: Record<string, string> = {};
-    for (const s of (payServicesRes.data ?? []) as any[]) {
-      serviceMap[s.id] = s.name;
-    }
-
-    const recentPayments = rawPayments.map((p: any) => ({
-      ...p,
-      client_name:  userMap[p.user_id]    ?? '—',
-      service_name: serviceMap[p.service_id] ?? '—',
-    }));
+    const queue = { openCount: queueOpenRes.count ?? 0, topItems: queueItems };
 
     // ── Texpert Workload ───────────────────────────────────────────────────────
-    const texpertUsers = texpertUsersRes.data ?? [];
+    const texpertUsers = (texpertUsersRes.data ?? []) as any[];
     const texpertIds   = texpertUsers.map((u: any) => u.id);
 
     let texpertWorkload: any[] = [];
     if (texpertIds.length > 0) {
       const workloadRows = await Promise.all(
         texpertIds.map((id: string) =>
-          service
-            .from('client_services')
+          service.from('client_services')
             .select('*', { count: 'exact', head: true })
             .eq('assigned_texpert_id', id)
             .not('status', 'in', '("completed","cancelled")')
@@ -187,20 +168,17 @@ export const getDashboardStats = async (req: Request, res: Response) => {
       }));
     }
 
-    // ── Clients ───────────────────────────────────────────────────────────────
-    const clients = {
-      total:        totalClientsRes.count  ?? 0,
-      newThisMonth: newClientsRes.count ?? 0,
-    };
-
     res.json({
       revenue,
+      revenueByMonth,
       pipeline,
       queue,
-      overdueInvoices: overdueRes.count ?? 0,
-      recentPayments,
+      recentInquiries: recentInquiriesRes.data ?? [],
       texpertWorkload,
-      clients,
+      clients: {
+        total:        totalClientsRes.count ?? 0,
+        newThisMonth: newClientsRes.count   ?? 0,
+      },
     });
 
   } catch (err) {

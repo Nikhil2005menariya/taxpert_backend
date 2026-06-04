@@ -5,14 +5,15 @@ import { getAssignedClientIds } from '../../utils/service-access';
 import { logServiceEvent } from '../../utils/operations';
 import { emailQueue } from '../../queues/email.queue';
 import { SupabaseClient } from '@supabase/supabase-js';
+import { notifyClientForService } from '../../utils/notifications';
 
 const WORKFLOW_TRANSITIONS: Record<string, string> = {
   pending:             "documents_required",
   documents_required:  "documents_received",
   documents_received:  "in_progress",
   in_progress:         "under_review",
-  under_review:        "invoice_pending",
-  invoice_pending:     "completed",
+  under_review:        "payment",
+  payment:             "completed",
 };
 
 export const advanceWorkflow = async (req: Request, res: Response) => {
@@ -34,7 +35,7 @@ export const advanceWorkflow = async (req: Request, res: Response) => {
     const next = WORKFLOW_TRANSITIONS[cs.status];
     if (!next) return res.status(400).json({ error: `No transition from '${cs.status}'` });
 
-    if (cs.status === 'invoice_pending' && cs.payment_status !== 'paid') {
+    if (cs.status === 'payment' && cs.payment_status !== 'paid') {
       return res.status(400).json({ error: 'Cannot complete — payment not yet confirmed' });
     }
 
@@ -67,6 +68,12 @@ export const advanceWorkflow = async (req: Request, res: Response) => {
           status: next
         } }).catch(console.error);
       }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'status_changed',
+        title: `${serviceName}: status updated`,
+        body: `Now "${String(next).replace(/_/g, ' ')}".`,
+        metadata: { status: next },
+      });
     } catch {}
 
     res.json({ newStatus: next });
@@ -84,6 +91,18 @@ export const updateServiceStatus = async (req: Request, res: Response) => {
 
     const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
     if (!isStaffRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
+
+    // Completion requires confirmed payment — a service cannot be closed unpaid.
+    if (status === 'completed') {
+      const { data: cs } = await req.supabase
+        .from('client_services')
+        .select('payment_status')
+        .eq('id', id)
+        .single();
+      if (cs && cs.payment_status !== 'paid') {
+        return res.status(400).json({ error: 'Cannot complete — payment not yet confirmed' });
+      }
+    }
 
     const now = new Date().toISOString();
     const { error } = await req.supabase

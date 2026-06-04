@@ -1,6 +1,97 @@
 import { Request, Response } from 'express';
 import { createServiceClient } from '../../configs/supabase.config';
 import { isAdminRole, UserRole, isStaffRole } from '../../shared/roles';
+import { emailQueue } from '../../queues/email.queue';
+import { appLogger } from '../../utils/logger';
+
+export const listClientUsers = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const { data: me } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
+    if (!isAdminRole(me?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
+
+    const service = createServiceClient();
+    const page   = Math.max(1, parseInt(String(req.query.page  ?? '1'),  10));
+    const limit  = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10)));
+    const search = String(req.query.search ?? '').trim();
+
+    let query = service
+      .from('users')
+      .select('id, first_name, last_name, email, mobile, pan, is_active, created_at', { count: 'exact' })
+      .eq('role', 'client')
+      .order('created_at', { ascending: false })
+      .range((page - 1) * limit, page * limit - 1);
+
+    if (search) {
+      query = query.or(
+        `first_name.ilike.%${search}%,last_name.ilike.%${search}%,pan.ilike.%${search}%,mobile.ilike.%${search}%`
+      );
+    }
+
+    const { data: users, count, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Fetch service counts only for this page's user IDs
+    const userIds = (users ?? []).map((u: any) => u.id);
+    const countMap: Record<string, { total: number; filed: number }> = {};
+
+    if (userIds.length > 0) {
+      const { data: svcs } = await service
+        .from('client_services')
+        .select('user_id, status')
+        .in('user_id', userIds);
+
+      for (const s of svcs ?? []) {
+        if (!countMap[s.user_id]) countMap[s.user_id] = { total: 0, filed: 0 };
+        countMap[s.user_id].total++;
+        if (s.status === 'completed') countMap[s.user_id].filed++;
+      }
+    }
+
+    const data = (users ?? []).map((u: any) => ({
+      ...u,
+      total_services:     countMap[u.id]?.total ?? 0,
+      completed_services: countMap[u.id]?.filed  ?? 0,
+    }));
+
+    res.json({ data, count, page, limit });
+  } catch (error) {
+    console.error('listClientUsers error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const listStaffUsers = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const { data: me } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
+    if (!isAdminRole(me?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
+
+    const service = createServiceClient();
+    const page   = Math.max(1, parseInt(String(req.query.page  ?? '1'),  10));
+    const limit  = Math.min(50, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10)));
+    const search = String(req.query.search ?? '').trim();
+    const role   = String(req.query.role   ?? '').trim();
+
+    let query = service
+      .from('users')
+      .select('id, first_name, last_name, email, mobile, pan, role, is_active, created_at', { count: 'exact' })
+      .neq('role', 'client')
+      .order('created_at', { ascending: false })
+      .range((page - 1) * limit, page * limit - 1);
+
+    if (role)   query = query.eq('role', role);
+    if (search) query = query.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,mobile.ilike.%${search}%`);
+
+    const { data, count, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ data, count, page, limit });
+  } catch (error) {
+    console.error('listStaffUsers error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
 
 export const getAllUsers = async (req: Request, res: Response) => {
   try {
@@ -68,9 +159,15 @@ export const createUser = async (req: Request, res: Response) => {
       return res.status(400).json({ error: profileError.message });
     }
 
+    // Queue welcome email via worker (non-blocking)
+    emailQueue.add('new-user-welcome', {
+      type:    'new-user-welcome',
+      payload: { to: email, firstName: first_name, email, password, role },
+    }).catch(e => appLogger.warn('new-user-welcome enqueue failed', { err: e.message }));
+
     res.json({ success: true, userId: authData.user.id });
   } catch (error) {
-    console.error('createUser error:', error);
+    appLogger.error('createUser error', { error });
     res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -110,21 +207,42 @@ export const setUserPassword = async (req: Request, res: Response) => {
   try {
     if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
+    const { data: adminProfile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
+    if (!isAdminRole(adminProfile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
 
-    const { userId, newPassword } = req.body;
-    if (!newPassword || newPassword.length < 8) {
+    const { userId, newPassword, password } = req.body;
+    const pwd = (newPassword ?? password ?? '') as string;
+    if (!pwd || pwd.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
     const service = createServiceClient();
-    const { error: authError } = await service.auth.admin.updateUserById(userId, { password: newPassword });
+
+    // Fetch user info for the notification email
+    const { data: user } = await service
+      .from('users')
+      .select('email, first_name')
+      .eq('id', userId)
+      .single();
+
+    const { error: authError } = await service.auth.admin.updateUserById(userId, { password: pwd });
     if (authError) return res.status(400).json({ error: authError.message });
+
+    // Queue notification email (non-blocking)
+    if (user?.email) {
+      emailQueue.add('admin-password-reset', {
+        type:    'admin-password-reset',
+        payload: {
+          to:          user.email,
+          firstName:   user.first_name ?? 'User',
+          newPassword: pwd,
+        },
+      }).catch(e => appLogger.warn('admin-password-reset enqueue failed', { err: e.message }));
+    }
 
     res.json({ success: true });
   } catch (error) {
-    console.error('setUserPassword error:', error);
+    appLogger.error('setUserPassword error', { error });
     res.status(500).json({ error: 'Internal server error' });
   }
 };

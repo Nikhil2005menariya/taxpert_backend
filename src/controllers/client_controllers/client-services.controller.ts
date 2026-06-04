@@ -3,6 +3,9 @@ import { isAdminRole, isStaffRole, UserRole } from '../../shared/roles';
 import { getAssignedClientIds, canAccessClientServiceRecord } from '../../utils/service-access';
 import { logServiceEvent } from '../../utils/operations';
 import { createServiceClient } from '../../configs/supabase.config';
+import { emailQueue } from '../../queues/email.queue';
+import { appLogger } from '../../utils/logger';
+import { notifyTexpertForService, notifyAdmins } from '../../utils/notifications';
 
 const SERVICE_SELECT = `
   id, user_id, service_id, status, payment_status, payment_id,
@@ -69,16 +72,17 @@ export const getDashboardSummary = async (req: Request, res: Response) => {
     const role = (profile?.role ?? 'client') as UserRole;
 
     if (isStaffRole(role)) {
+      const sc = createServiceClient();
       const [
         { count: total },
         { count: active },
         { count: needsDocs },
         { count: invoicePending },
       ] = await Promise.all([
-        req.supabase.from('client_services').select('id', { count: 'exact', head: true }),
-        req.supabase.from('client_services').select('id', { count: 'exact', head: true }).not('status', 'in', '(completed,cancelled)'),
-        req.supabase.from('client_services').select('id', { count: 'exact', head: true }).eq('status', 'documents_required'),
-        req.supabase.from('client_services').select('id', { count: 'exact', head: true }).eq('status', 'invoice_pending').eq('payment_status', 'pending'),
+        sc.from('client_services').select('id', { count: 'exact', head: true }),
+        sc.from('client_services').select('id', { count: 'exact', head: true }).not('status', 'in', '(completed,cancelled)'),
+        sc.from('client_services').select('id', { count: 'exact', head: true }).in('status', ['documents_required', 'action_required']),
+        sc.from('client_services').select('id', { count: 'exact', head: true }).eq('status', 'payment').eq('payment_status', 'pending'),
       ]);
       return res.json({
         data: {
@@ -107,11 +111,17 @@ export const getDashboardSummary = async (req: Request, res: Response) => {
     const all = (rows ?? []) as any[];
     const active = all.filter(s => !['completed', 'cancelled'].includes(s.status));
     const completed = all.filter(s => s.status === 'completed').length;
-    const docsRequired = all.filter(s => s.status === 'documents_required');
+    const PENDING_DOC_STATUSES = ['pending', 'rejected', 'expired'];
+    const hasPendingDocs = (s: any) =>
+      (s.client_documents ?? []).some((d: any) => PENDING_DOC_STATUSES.includes(d.status));
+
+    const docsRequired = all.filter(
+      s => s.status === 'documents_required' || (s.status === 'action_required' && hasPendingDocs(s))
+    );
 
     const totalPendingDocs = docsRequired.reduce((sum, s) => {
       return sum + (s.client_documents ?? []).filter(
-        (d: any) => d.status === 'pending' || d.status === 'rejected' || d.status === 'expired'
+        (d: any) => PENDING_DOC_STATUSES.includes(d.status)
       ).length;
     }, 0);
 
@@ -170,7 +180,7 @@ export const getClientServiceById = async (req: Request, res: Response) => {
       .select(`
         id, user_id, service_id, status, payment_status, payment_id,
         pinned_message, pinned_message_at,
-        fiscal_year, assigned_to, assigned_by, status_updated_at, created_at, updated_at,
+        fiscal_year, assigned_to, assigned_by, assigned_texpert_id, status_updated_at, created_at, updated_at,
         deletion_requested, deletion_requested_at,
         service:services(id, name, category, slug),
         client_documents(
@@ -227,21 +237,30 @@ export const removeServiceDirect = async (req: Request, res: Response) => {
     const sc = createServiceClient();
     const { data: cs } = await sc
       .from('client_services')
-      .select('id, user_id')
+      .select('id, user_id, assigned_texpert_id')
       .eq('id', id)
       .single();
 
     if (!cs) return res.status(404).json({ error: 'Service not found' });
     if (!isStaffRole(profile?.role) && cs.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    // Count docs via service client
-    const { count: docCount } = await sc
-      .from('client_documents')
+    // Once a Taxpert is assigned they own the work — removal must go through the
+    // approval flow (request-deletion → texpert/admin accepts). Block direct delete.
+    if (cs.assigned_texpert_id) {
+      return res.status(400).json({ error: 'A Taxpert is assigned — request deletion instead so your Taxpert or an admin can review.' });
+    }
+
+    // Never hard-delete a service with payment history — financial records must be preserved.
+    const { count: payCount } = await sc
+      .from('payments')
       .select('id', { count: 'exact', head: true })
       .eq('client_service_id', id);
+    if ((payCount ?? 0) > 0) {
+      return res.status(400).json({ error: 'This service has payment history and cannot be removed. Please contact support.' });
+    }
 
-    if ((docCount ?? 0) > 0) return res.status(400).json({ error: 'Service has documents — request deletion instead so your Taxpert can review.' });
-
+    // No Taxpert assigned → remove completely. Cascade clears documents, events,
+    // tasks and queue entries, so this works even when documents were uploaded.
     const { error } = await sc.from('client_services').delete().eq('id', id);
     if (error) return res.status(400).json({ error: error.message });
 
@@ -260,7 +279,11 @@ export const requestServiceDeletion = async (req: Request, res: Response) => {
     const sc = createServiceClient();
 
     // Verify ownership via service client
-    const { data: cs } = await sc.from('client_services').select('id, user_id').eq('id', id).single();
+    const { data: cs } = await sc
+      .from('client_services')
+      .select('id, user_id, service_id, fiscal_year, assigned_texpert_id')
+      .eq('id', id)
+      .single();
     if (!cs) return res.status(404).json({ error: 'Service not found' });
     if (cs.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
@@ -278,6 +301,49 @@ export const requestServiceDeletion = async (req: Request, res: Response) => {
       eventType: 'deletion_requested',
       message: 'Client requested deletion for this service.',
     });
+
+    // Notify the assigned Taxpert by email (non-blocking)
+    if (cs.assigned_texpert_id) {
+      try {
+        const [{ data: texpert }, { data: client }, { data: svc }] = await Promise.all([
+          sc.from('users').select('email, first_name').eq('id', cs.assigned_texpert_id).single(),
+          sc.from('users').select('first_name, last_name, email').eq('id', cs.user_id).single(),
+          sc.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        const clientName = client ? `${client.first_name ?? ''} ${client.last_name ?? ''}`.trim() || 'A client' : 'A client';
+        const serviceName = svc?.name ?? 'a service';
+        if (texpert?.email) {
+          emailQueue.add('deletion-requested', {
+            type:    'deletion-requested',
+            payload: {
+              to:           texpert.email,
+              texpertFirstName: texpert.first_name ?? 'there',
+              clientName,
+              clientEmail:  client?.email ?? null,
+              serviceName,
+              fiscalYear:   cs.fiscal_year ?? null,
+              clientServiceId: id,
+            },
+          }).catch(e => appLogger.warn('deletion-requested email enqueue failed', { err: e.message }));
+        }
+        void notifyTexpertForService(cs.assigned_texpert_id, id, {
+          type: 'deletion_requested',
+          title: `Deletion requested · ${serviceName}`,
+          body: `${clientName} requested to delete this service. Review and approve or reject.`,
+        });
+        // Admins only need to know about deletion requests on assigned (in-progress) services.
+        if (cs.assigned_texpert_id) {
+          void notifyAdmins({
+            type: 'deletion_requested',
+            title: `Deletion requested · ${serviceName}`,
+            body: `${clientName} requested to delete an assigned service.`,
+            link: `/admin/client-services/${id}`,
+          });
+        }
+      } catch (e) {
+        appLogger.warn('deletion-requested email lookup failed', { err: (e as Error).message });
+      }
+    }
 
     res.json({ success: true });
   } catch (error) {

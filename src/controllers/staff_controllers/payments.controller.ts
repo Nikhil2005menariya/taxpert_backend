@@ -83,47 +83,6 @@ export const getPaymentStats = async (req: Request, res: Response) => {
   }
 };
 
-export const getAllServicesWithPrices = async (req: Request, res: Response) => {
-  try {
-    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
-
-    const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    if (!isStaffRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
-
-    const { data, error } = await req.supabase
-      .from('services')
-      .select('id, slug, name, category, price, is_active')
-      .order('category').order('name');
-
-    if (error) return res.status(400).json({ error: error.message });
-    res.json({ data });
-  } catch (error) {
-    console.error('getAllServicesWithPrices error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-export const updateServicePrice = async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { paise } = req.body;
-    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
-
-    if (paise < 0 || !Number.isInteger(paise)) return res.status(400).json({ error: 'Invalid price' });
-
-    const { data: profile } = await req.supabase.from('users').select('role').eq('id', req.user.id).single();
-    if (!isAdminRole(profile?.role as UserRole)) return res.status(403).json({ error: 'Forbidden' });
-
-    const { error } = await req.supabase.from('services').update({ price: paise }).eq('id', id);
-    if (error) return res.status(400).json({ error: error.message });
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('updateServicePrice error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
 // --- Invoices endpoints (bundled into payments router or separate router) ---
 // Avoid FK-hint on users (constraint name varies by migration) — fetch client separately
 const INVOICE_SELECT = `

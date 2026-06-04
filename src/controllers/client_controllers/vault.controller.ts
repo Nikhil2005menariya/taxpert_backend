@@ -5,6 +5,8 @@ import { logServiceEvent } from '../../utils/operations';
 import { canAccessClientServiceRecord } from '../../utils/service-access';
 import { mirrorServiceDocToCommon, propagateCommonDocToServices, prefillServiceDocsFromCommon } from '../../utils/doc-sync';
 import { createServiceClient } from '../../configs/supabase.config';
+import { writeAudit } from '../../utils/audit';
+import { notifyTexpertForService } from '../../utils/notifications';
 
 export const getVaultGroups = async (req: Request, res: Response) => {
   try {
@@ -222,7 +224,7 @@ export const uploadDocument = async (req: Request, res: Response) => {
 
     const { data: cs } = await req.supabase
       .from('client_services')
-      .select('id, user_id, created_at, fiscal_year, assigned_to')
+      .select('id, user_id, created_at, fiscal_year, assigned_to, assigned_texpert_id, service_id')
       .eq('id', serviceId)
       .single();
 
@@ -358,6 +360,35 @@ export const uploadDocument = async (req: Request, res: Response) => {
       message: `${isStaffRole(profile?.role as UserRole) ? 'Internal operator' : 'Client'} uploaded '${documentName}'.`,
       metadata: { document_id: targetDocumentId, template_id: templateId, document_name: documentName },
     });
+
+    writeAudit({
+      actorId:    req.user!.id,
+      action:     'document_uploaded',
+      targetType: 'client_document',
+      targetId:   targetDocumentId,
+      metadata: {
+        clientServiceId: serviceId,
+        documentName,
+        documentType,
+      },
+    }).catch(() => {/* non-blocking */});
+
+    // When the CLIENT uploads, notify the assigned Taxpert so they can review.
+    if (!isStaffRole(profile?.role as UserRole) && cs.assigned_texpert_id) {
+      void (async () => {
+        const sc = createServiceClient();
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          sc.from('users').select('first_name, last_name').eq('id', cs.user_id).single(),
+          sc.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        const clientName = client ? `${client.first_name ?? ''} ${client.last_name ?? ''}`.trim() || 'Client' : 'Client';
+        await notifyTexpertForService(cs.assigned_texpert_id, serviceId, {
+          type: 'document_uploaded',
+          title: `Document uploaded · ${svc?.name ?? 'service'}`,
+          body: `${clientName} uploaded "${documentName}".`,
+        });
+      })().catch(() => {/* non-blocking */});
+    }
 
     res.json({ documentId: targetDocumentId, filePath, storedFilename, status: 'uploaded' });
   } catch (error) {

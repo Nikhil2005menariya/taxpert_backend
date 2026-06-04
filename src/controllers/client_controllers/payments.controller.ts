@@ -10,7 +10,7 @@ export const getPendingClientInvoices = async (req: Request, res: Response) => {
       .from('client_services')
       .select('id, status, payment_status, service:services(id, name, slug, category, price)')
       .eq('user_id', req.user.id)
-      .eq('status', 'invoice_pending')
+      .eq('status', 'payment')
       .neq('payment_status', 'paid');
 
     if (error) return res.status(400).json({ error: error.message });

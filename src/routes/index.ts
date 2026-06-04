@@ -20,6 +20,9 @@ import texpertRoutes          from './texpert/texpert.routes';
 import operationsRoutes       from './texpert/operations.routes';
 import remindersRoutes        from './texpert/reminders.routes';
 
+// ── Notifications (any authenticated user) ────────────────────
+import notificationsRoutes    from './common/notifications.routes';
+
 // ── Admin ─────────────────────────────────────────────────────
 import adminRoutes            from './admin/admin.routes';
 import adminConfigRoutes      from './admin/config.routes';
@@ -55,6 +58,9 @@ router.use('/coupons',          clientCouponsRoutes);
 router.use('/texpert',          texpertRoutes);
 router.use('/operations',       operationsRoutes);
 router.use('/reminders',        remindersRoutes);
+
+// Notifications
+router.use('/notifications',    notificationsRoutes);
 
 // Admin
 router.use('/admin',            adminRoutes);

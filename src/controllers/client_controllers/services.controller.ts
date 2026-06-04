@@ -3,6 +3,7 @@ import { createServiceClient } from '../../configs/supabase.config';
 import { currentFY } from '../../shared/fy-utils';
 import { autoAssignTaxpert } from '../../utils/auto-assign';
 import { emailQueue } from '../../queues/email.queue';
+import { notifyServiceQueued } from '../../utils/operations';
 import { prefillServiceDocsFromCommon } from '../../utils/doc-sync';
 
 export const checkServiceExists = async (req: Request, res: Response) => {
@@ -84,6 +85,9 @@ export const assignService = async (req: Request, res: Response) => {
     void serviceClient.from('service_assignment_queue')
       .insert({ client_service_id: cs.id, priority: 0 })
       .then(({ error }) => { if (error) console.error('[queue] insert failed:', error.message); });
+
+    // Notify the client their request is queued for assignment (non-blocking)
+    void notifyServiceQueued(cs.id);
 
     // Auto-assign
     autoAssignTaxpert(serviceClient, req.user.id).catch(console.error);

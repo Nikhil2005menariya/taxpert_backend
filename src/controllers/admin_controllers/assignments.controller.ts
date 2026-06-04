@@ -4,6 +4,8 @@ import { isAdminRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
 import { emailQueue } from '../../queues/email.queue';
+import { notifyServiceQueued } from '../../utils/operations';
+import { notifyClientForService, notifyTexpertForService } from '../../utils/notifications';
 
 async function assertAdmin(req: Request, res: Response): Promise<boolean> {
   if (!req.user || !req.supabase) { res.status(401).json({ error: 'Unauthorized' }); return false; }
@@ -132,6 +134,21 @@ export const assignTexpert = async (req: Request, res: Response) => {
             },
           }).catch(e => appLogger.warn('texpert-assigned enqueue failed', { err: e.message }));
         }
+        const tName = texpertProfile ? texpertProfile.first_name : 'A Taxpert';
+        const svcName = svc?.name ?? 'your service';
+        void notifyClientForService(cs.user_id, clientServiceId, {
+          type: 'texpert_assigned',
+          title: `Taxpert assigned · ${svcName}`,
+          body: `${tName} will be handling your service.`,
+        });
+        // Notify the texpert that a new service landed on their desk.
+        const { data: clientUser } = await service.from('users').select('first_name, last_name').eq('id', cs.user_id).single();
+        const clientName = clientUser ? `${clientUser.first_name ?? ''} ${clientUser.last_name ?? ''}`.trim() || 'a client' : 'a client';
+        void notifyTexpertForService(texpertId, clientServiceId, {
+          type: 'service_assigned',
+          title: `New service assigned · ${svcName}`,
+          body: `You've been assigned ${clientName}'s ${svcName}${cs.fiscal_year ? ` (${cs.fiscal_year})` : ''}.`,
+        });
       }
     } catch (e) {
       appLogger.warn('assignTexpert email lookup failed', { err: (e as Error).message });
@@ -209,6 +226,9 @@ export const addToQueue = async (req: Request, res: Response) => {
       targetId:   clientServiceId,
       metadata:   { priority },
     });
+
+    // Notify the client their service is queued for assignment (non-blocking)
+    void notifyServiceQueued(clientServiceId);
 
     res.json({ success: true });
   } catch (err) {

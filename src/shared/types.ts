@@ -42,15 +42,15 @@ export function getRoleLabel(role: string | null | undefined) {
 }
 
 // ── Service Status ────────────────────────────────────────────
-// Canonical enum post-refactor-v2. Run supabase/refactor-v2-status.sql first.
-// Flow: pending → documents_required → documents_received → in_progress → under_review → invoice_pending → completed
+// Canonical enum. Run migrations/rename-invoice-pending-to-payment.sql first.
+// Flow: pending → documents_required → documents_received → in_progress → under_review → payment → completed
 export type ServiceStatus =
   | "pending"
   | "documents_required"
   | "documents_received"
   | "in_progress"
   | "under_review"
-  | "invoice_pending"
+  | "payment"
   | "completed"
   | "on_hold"
   | "cancelled";
@@ -61,7 +61,7 @@ export const SERVICE_STATUSES: ServiceStatus[] = [
   "documents_received",
   "in_progress",
   "under_review",
-  "invoice_pending",
+  "payment",
   "completed",
   "on_hold",
   "cancelled",
@@ -73,7 +73,7 @@ export const SERVICE_STATUS_LABELS: Record<ServiceStatus, string> = {
   documents_received: "Documents Received",
   in_progress: "In Progress",
   under_review: "Under Review",
-  invoice_pending: "Invoice Pending",
+  payment: "Payment",
   completed: "Completed",
   on_hold: "On Hold",
   cancelled: "Cancelled",
@@ -85,7 +85,7 @@ export const SERVICE_STATUS_SHORT_LABELS: Record<ServiceStatus, string> = {
   documents_received: "Docs Received",
   in_progress: "In Progress",
   under_review: "Under Review",
-  invoice_pending: "Invoice Pending",
+  payment: "Payment",
   completed: "Completed",
   on_hold: "On Hold",
   cancelled: "Cancelled",
@@ -97,7 +97,7 @@ export const SERVICE_STATUS_STYLES: Record<ServiceStatus, { bg: string; fg: stri
   documents_received: { bg: "rgba(80,120,200,0.1)", fg: "#3a5fc4" },
   in_progress: { bg: "rgba(80,120,200,0.12)", fg: "#3a5fc4" },
   under_review: { bg: "rgba(130,80,200,0.1)", fg: "#7a3fc4" },
-  invoice_pending: { bg: "rgba(245,158,11,0.12)", fg: "#b45309" },
+  payment: { bg: "rgba(245,158,11,0.12)", fg: "#b45309" },
   completed: { bg: "rgba(47,122,91,0.1)", fg: "var(--green-600)" },
   on_hold: { bg: "rgba(182,69,69,0.08)", fg: "var(--danger)" },
   cancelled: { bg: "rgba(182,69,69,0.08)", fg: "var(--danger)" },

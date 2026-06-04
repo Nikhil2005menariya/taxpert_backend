@@ -18,6 +18,12 @@ import {
   sendPaymentFailedEmail,
   sendInvoiceGeneratedEmail,
   sendCouponIssuedEmail,
+  sendPasswordResetEmail,
+  sendNewUserWelcomeEmail,
+  sendDeletionRequestedEmail,
+  sendServiceHoldEmail,
+  sendPinnedMessageEmail,
+  sendServiceQueuedEmail,
 } from '../utils/email';
 import { appLogger } from '../utils/logger';
 
@@ -60,6 +66,24 @@ export const emailWorker = new Worker('email', async (job: Job) => {
       break;
     case 'texpert-credentials':
       await sendTexpertCredentialsEmail(payload);
+      break;
+    case 'admin-password-reset':
+      await sendPasswordResetEmail(payload);
+      break;
+    case 'new-user-welcome':
+      await sendNewUserWelcomeEmail(payload);
+      break;
+    case 'deletion-requested':
+      await sendDeletionRequestedEmail(payload);
+      break;
+    case 'service-hold':
+      await sendServiceHoldEmail(payload);
+      break;
+    case 'pinned-message':
+      await sendPinnedMessageEmail(payload);
+      break;
+    case 'service-queued':
+      await sendServiceQueuedEmail(payload);
       break;
     case 'payout-recorded':
       await sendPayoutRecordedEmail(payload);

@@ -4,6 +4,7 @@ import { isTaxExpertRole, UserRole } from '../../shared/roles';
 import { appLogger } from '../../utils/logger';
 import { writeAudit } from '../../utils/audit';
 import { emailQueue } from '../../queues/email.queue';
+import { notifyClientForService } from '../../utils/notifications';
 
 async function assertTexpert(req: Request, res: Response): Promise<{ role: string } | null> {
   if (!req.user || !req.supabase) { res.status(401).json({ error: 'Unauthorized' }); return null; }
@@ -118,7 +119,7 @@ export const getServiceDetail = async (req: Request, res: Response) => {
     const csData = cs as any;
 
     // Parallel lookups for related entities
-    const [serviceRes, clientRes, docsRes, eventsRes, tasksRes, payoutsRes, outputDocsRes] = await Promise.all([
+    const [serviceRes, clientRes, docsRes, eventsRes, tasksRes, outputDocsRes] = await Promise.all([
       service.from('services').select('id, name, slug, category, price').eq('id', csData.service_id).single(),
       service.from('users').select('id, first_name, last_name, email, mobile, pan').eq('id', csData.user_id).single(),
       service.from('client_documents')
@@ -132,11 +133,6 @@ export const getServiceDetail = async (req: Request, res: Response) => {
         .select('id, title, description, task_type, scope, status, owner_user_id, due_at, completed_at, sort_order')
         .eq('client_service_id', id)
         .order('sort_order'),
-      service.from('texpert_payouts')
-        .select('id, amount, paid_at, notes')
-        .eq('client_service_id', id)
-        .eq('texpert_id', req.user!.id)
-        .order('paid_at', { ascending: false }),
       service.from('output_documents')
         .select('id, document_name, description, file_path, mime_type, uploaded_by, uploaded_at')
         .eq('client_service_id', id)
@@ -168,7 +164,6 @@ export const getServiceDetail = async (req: Request, res: Response) => {
         output_documents: outputDocsWithUrls,
         service_events:   eventsRes.error?.code === '42P01' ? [] : (eventsRes.data ?? []),
         service_tasks:    tasksRes.error?.code  === '42P01' ? [] : (tasksRes.data  ?? []),
-        payouts:          payoutsRes.data ?? [],
       },
     });
   } catch (err) {
@@ -187,7 +182,7 @@ export const updateServiceStatus = async (req: Request, res: Response) => {
 
     const ALLOWED_STATUSES = [
       'documents_required', 'documents_received', 'in_progress',
-      'under_review', 'invoice_pending', 'completed', 'on_hold',
+      'under_review', 'payment', 'completed', 'on_hold',
     ];
     if (!ALLOWED_STATUSES.includes(status)) {
       return res.status(400).json({ error: `Invalid status. Allowed: ${ALLOWED_STATUSES.join(', ')}` });
@@ -198,12 +193,17 @@ export const updateServiceStatus = async (req: Request, res: Response) => {
     // Verify ownership — fetch service_id + user_id for follow-up enrichment
     const { data: cs } = await service
       .from('client_services')
-      .select('id, user_id, service_id')
+      .select('id, user_id, service_id, payment_status')
       .eq('id', id)
       .eq('assigned_texpert_id', req.user!.id)
       .single();
 
     if (!cs) return res.status(404).json({ error: 'Service not found' });
+
+    // A service can only be completed once payment is confirmed.
+    if (status === 'completed' && cs.payment_status !== 'paid') {
+      return res.status(400).json({ error: 'Cannot complete — payment not yet confirmed' });
+    }
 
     const updatePayload: Record<string, unknown> = {
       status,
@@ -241,17 +241,24 @@ export const updateServiceStatus = async (req: Request, res: Response) => {
         service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
         service.from('services').select('name').eq('id', cs.service_id).single(),
       ]);
+      const serviceName = svc?.name ?? 'your service';
       if (clientUser?.email) {
         emailQueue.add('workflow-status', {
           type:    'workflow-status',
           payload: {
             to:          clientUser.email,
             firstName:   clientUser.first_name,
-            serviceName: svc?.name ?? 'your service',
+            serviceName,
             status,
           },
         }).catch(e => appLogger.warn('workflow-status email enqueue failed', { err: e.message }));
       }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'status_changed',
+        title: `${serviceName}: status updated`,
+        body: `Now "${String(status).replace(/_/g, ' ')}".`,
+        metadata: { status },
+      });
     } catch (e) {
       appLogger.warn('workflow-status email lookup failed', { err: (e as Error).message });
     }
@@ -319,18 +326,24 @@ export const requestReupload = async (req: Request, res: Response) => {
         sc.from('users').select('email, first_name').eq('id', cs.user_id).single(),
         sc.from('services').select('name').eq('id', cs.service_id).single(),
       ]);
+      const serviceName = svc?.name ?? 'your service';
       if (client?.email) {
         emailQueue.add('reupload-request', {
           type: 'reupload-request',
           payload: {
             to:           client.email,
             firstName:    client.first_name,
-            serviceName:  svc?.name ?? 'your service',
+            serviceName,
             documentName: doc.document_name,
             note,
           },
         }).catch(e => appLogger.warn('reupload email enqueue failed', { err: e.message }));
       }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'document_reupload',
+        title: `Re-upload requested · ${serviceName}`,
+        body: `Please re-upload ${doc.document_name}${note ? `: ${note}` : '.'}`,
+      });
     } catch (e) {
       appLogger.warn('reupload email lookup failed', { err: (e as Error).message });
     }
@@ -392,17 +405,23 @@ export const addDocSlot = async (req: Request, res: Response) => {
         sc.from('users').select('email, first_name').eq('id', cs.user_id).single(),
         sc.from('services').select('name').eq('id', cs.service_id).single(),
       ]);
+      const serviceName = svc?.name ?? 'your service';
       if (client?.email) {
         emailQueue.add('additional-doc-added', {
           type: 'additional-doc-added',
           payload: {
             to:          client.email,
             firstName:   client.first_name,
-            serviceName: svc?.name ?? 'your service',
+            serviceName,
             docName:     documentName.trim(),
           },
         }).catch(e => appLogger.warn('add-doc email enqueue failed', { err: e.message }));
       }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'document_added',
+        title: `New document requested · ${serviceName}`,
+        body: `Please upload: ${documentName.trim()}`,
+      });
     } catch (e) {
       appLogger.warn('addDocSlot email lookup failed', { err: (e as Error).message });
     }
@@ -537,7 +556,11 @@ export const approveDocument = async (req: Request, res: Response) => {
           },
         }).catch(e => appLogger.warn('approve email enqueue failed', { err: e.message }));
       }
-      void svc;
+      void notifyClientForService(cs.user_id, id, {
+        type: 'document_approved',
+        title: `Document approved · ${svc?.name ?? 'your service'}`,
+        body: `${doc.document_name} was approved.`,
+      });
     } catch (e) {
       appLogger.warn('approve email lookup failed', { err: (e as Error).message });
     }
@@ -628,6 +651,11 @@ export const rejectDocument = async (req: Request, res: Response) => {
           },
         }).catch(e => appLogger.warn('reject email enqueue failed', { err: e.message }));
       }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'document_rejected',
+        title: 'Document rejected',
+        body: `${doc.document_name} was rejected: ${reason.trim()}`,
+      });
     } catch (e) {
       appLogger.warn('reject email lookup failed', { err: (e as Error).message });
     }
@@ -862,6 +890,34 @@ export const updatePinnedMessage = async (req: Request, res: Response) => {
       metadata:          { is_internal: true },
     });
 
+    // A pinned message is a message TO the client — email + notify (only when set).
+    const pinnedText = pinned_message?.trim();
+    if (pinnedText) {
+      try {
+        const { data: cs } = await sc.from('client_services').select('user_id, service_id').eq('id', id).single();
+        if (cs) {
+          const [{ data: client }, { data: svc }] = await Promise.all([
+            sc.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+            sc.from('services').select('name').eq('id', cs.service_id).single(),
+          ]);
+          const serviceName = svc?.name ?? 'your service';
+          if (client?.email) {
+            emailQueue.add('pinned-message', {
+              type: 'pinned-message',
+              payload: { to: client.email, firstName: client.first_name, serviceName, message: pinnedText, clientServiceId: id },
+            }).catch(e => appLogger.warn('pinned email enqueue failed', { err: e.message }));
+          }
+          void notifyClientForService(cs.user_id, id, {
+            type: 'pinned_message',
+            title: `New message · ${serviceName}`,
+            body: pinnedText.length > 90 ? pinnedText.slice(0, 90) + '…' : pinnedText,
+          });
+        }
+      } catch (e) {
+        appLogger.warn('pinned notify failed', { err: (e as Error).message });
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     appLogger.error('updatePinnedMessage error', { err });
@@ -908,18 +964,15 @@ export const getDashboard = async (req: Request, res: Response) => {
     // ── Parallel fetch: assigned services (basis for everything else) ──
     const { data: services, error: svcErr } = await sc
       .from('client_services')
-      .select('id, status, fiscal_year, status_updated_at, assigned_texpert_at, created_at, updated_at, user_id, service_id')
+      .select('id, status, payment_status, fiscal_year, status_updated_at, assigned_texpert_at, created_at, updated_at, user_id, service_id')
       .eq('assigned_texpert_id', uid);
 
     if (svcErr) return res.status(400).json({ error: svcErr.message });
 
     const serviceIds = (services ?? []).map((s: any) => s.id);
 
-    // ── Parallel: payouts, queue count, docs, events ──
-    const [payoutsRes, queueRes, docsRes, eventsRes] = await Promise.all([
-      sc.from('texpert_payouts')
-        .select('amount, paid_at')
-        .eq('texpert_id', uid),
+    // ── Parallel: queue count, docs, events ──
+    const [queueRes, docsRes, eventsRes] = await Promise.all([
       sc.from('service_assignment_queue')
         .select('id', { count: 'exact', head: true })
         .eq('status', 'open'),
@@ -933,7 +986,7 @@ export const getDashboard = async (req: Request, res: Response) => {
             .select('id, client_service_id, event_type, message, created_at, actor_user_id, metadata')
             .in('client_service_id', serviceIds)
             .order('created_at', { ascending: false })
-            .limit(15)
+            .limit(40)
         : Promise.resolve({ data: [] as any[], error: null }),
     ]);
 
@@ -947,13 +1000,6 @@ export const getDashboard = async (req: Request, res: Response) => {
     ).length;
 
     const allDocs   = docsRes.data ?? [];
-    const payouts   = payoutsRes.data ?? [];
-
-    const earningsThisMonth = payouts
-      .filter((p: any) => p.paid_at >= monthStart)
-      .reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
-
-    const totalEarned = payouts.reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
 
     // "Pending review" = services that have docs uploaded but not yet approved
     const pendingReviewSet = new Set<string>();
@@ -969,8 +1015,6 @@ export const getDashboard = async (req: Request, res: Response) => {
       activeServices,
       pendingReview,
       completedThisMonth,
-      earningsThisMonth,
-      totalEarned,
       queueOpen: queueRes.count ?? 0,
     };
 
@@ -990,7 +1034,7 @@ export const getDashboard = async (req: Request, res: Response) => {
       client_display: string;
       fiscal_year: string | null;
       status: string;
-      reason: 'new_docs' | 'overdue_reupload' | 'sla_overdue' | 'sla_attention';
+      reason: 'payment_received' | 'new_docs' | 'overdue_reupload' | 'sla_overdue' | 'sla_attention';
       priority: number; // for sorting (higher first)
       updated_at: string;
     };
@@ -1016,7 +1060,11 @@ export const getDashboard = async (req: Request, res: Response) => {
       let reason: AttentionItem['reason'] | null = null;
       let priority = 0;
 
-      if (newDocs.length > 0) {
+      if (s.status === 'payment' && s.payment_status === 'paid') {
+        // Client has paid — the service is ready for the texpert to finalise/complete.
+        reason   = 'payment_received';
+        priority = 40;
+      } else if (newDocs.length > 0) {
         reason   = 'new_docs';
         priority = 30 + newDocs.length;
       } else if (oldestStalledReupload && Date.now() - oldestStalledReupload > 3 * 86_400_000) {
@@ -1067,8 +1115,12 @@ export const getDashboard = async (req: Request, res: Response) => {
     }
 
     // ── Recent Activity ─────────────────────────────────────────
-    // Enrich events with service name + client first name
-    const events = (eventsRes.data ?? []).slice(0, 10);
+    // Events are already scoped to THIS texpert's assigned services. Drop the
+    // texpert's own actions so the feed shows updates from others — client doc
+    // uploads, payments, admin status changes, assignment, etc.
+    const events = (eventsRes.data ?? [])
+      .filter((e: any) => e.actor_user_id !== uid)
+      .slice(0, 10);
     if (events.length > 0) {
       const evtServiceIds = [...new Set(events.map((e: any) => e.client_service_id))];
       const evtServices   = (services ?? []).filter((s: any) => evtServiceIds.includes(s.id));
@@ -1103,101 +1155,3 @@ export const getDashboard = async (req: Request, res: Response) => {
   }
 };
 
-export const getTexpertOwnPayouts = async (req: Request, res: Response) => {
-  try {
-    if (!await assertTexpert(req, res)) return;
-    const sc  = createServiceClient();
-    const uid = req.user!.id;
-
-    const startDate = String(req.query.startDate ?? '').trim();
-    const endDate   = String(req.query.endDate   ?? '').trim();
-    const serviceId = String(req.query.serviceId ?? '').trim();
-
-    const now        = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    const last30Iso  = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-    // Fetch filtered payouts (scalar only — no FK joins)
-    let query = sc
-      .from('texpert_payouts')
-      .select('id, amount, paid_at, notes, client_service_id')
-      .eq('texpert_id', uid)
-      .order('paid_at', { ascending: false });
-
-    if (startDate) query = query.gte('paid_at', startDate);
-    if (endDate)   query = query.lte('paid_at', endDate + 'T23:59:59');
-
-    const { data: payouts, error } = await query;
-    if (error) return res.status(400).json({ error: error.message });
-
-    const allPayouts = payouts ?? [];
-
-    // Gather unique client_service IDs
-    const csIds = [...new Set(allPayouts.map((p: any) => p.client_service_id).filter(Boolean))] as string[];
-
-    const csRows: any[] = csIds.length
-      ? (await sc.from('client_services').select('id, user_id, service_id').in('id', csIds)).data ?? []
-      : [];
-
-    // Apply serviceId filter via client_services mapping
-    const filteredPayouts = serviceId
-      ? allPayouts.filter((p: any) => {
-          const cs = csRows.find((r: any) => r.id === p.client_service_id);
-          return cs?.service_id === serviceId;
-        })
-      : allPayouts;
-
-    // Batch-lookup services + clients for filtered rows only
-    const filteredCsRows = csRows.filter((r: any) =>
-      filteredPayouts.some((p: any) => p.client_service_id === r.id)
-    );
-    const svcIds  = [...new Set(filteredCsRows.map((r: any) => r.service_id).filter(Boolean))] as string[];
-    const userIds = [...new Set(filteredCsRows.map((r: any) => r.user_id).filter(Boolean))] as string[];
-
-    const [svcRes, clientRes] = await Promise.all([
-      svcIds.length  ? sc.from('services').select('id, name, category').in('id', svcIds)    : Promise.resolve({ data: [] as any[] }),
-      userIds.length ? sc.from('users').select('id, first_name').in('id', userIds)           : Promise.resolve({ data: [] as any[] }),
-    ]);
-
-    const svcMap    = new Map<string, any>(); for (const s of svcRes.data    ?? []) svcMap.set(s.id, s);
-    const clientMap = new Map<string, any>(); for (const c of clientRes.data ?? []) clientMap.set(c.id, c);
-    const csMap     = new Map<string, any>(); for (const r of filteredCsRows)       csMap.set(r.id, r);
-
-    const data = filteredPayouts.map((p: any) => {
-      const cs     = csMap.get(p.client_service_id);
-      const svc    = svcMap.get(cs?.service_id);
-      const client = clientMap.get(cs?.user_id);
-      return {
-        id:      p.id,
-        amount:  p.amount,
-        paid_at: p.paid_at,
-        notes:   p.notes,
-        service: svc    ? { name: svc.name, category: svc.category } : null,
-        client:  client ? { first_name: client.first_name, service_id: p.client_service_id } : null,
-      };
-    });
-
-    // Distinct services for filter dropdown (from ALL unfiltered payouts)
-    const allSvcIds = [...new Set(csRows.map((r: any) => r.service_id).filter(Boolean))] as string[];
-    const allSvcRes = allSvcIds.length
-      ? (await sc.from('services').select('id, name').in('id', allSvcIds)).data ?? []
-      : [];
-    const services = allSvcRes.map((s: any) => ({ id: s.id, name: s.name }));
-
-    // Stats from ALL payouts for this texpert (unfiltered)
-    const { data: allP } = await sc
-      .from('texpert_payouts')
-      .select('amount, paid_at')
-      .eq('texpert_id', uid);
-
-    const all = allP ?? [];
-    const totalEarned = all.reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
-    const thisMonth   = all.filter((p: any) => p.paid_at && p.paid_at >= monthStart).reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
-    const last30Days  = all.filter((p: any) => p.paid_at && p.paid_at >= last30Iso).reduce((s: number, p: any) => s + (p.amount ?? 0), 0);
-
-    res.json({ data, services, stats: { totalEarned, thisMonth, last30Days } });
-  } catch (err) {
-    appLogger.error('getTexpertOwnPayouts error', { err });
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};

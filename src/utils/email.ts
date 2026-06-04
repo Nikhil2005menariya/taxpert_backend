@@ -1,6 +1,21 @@
 import { resend, DEFAULT_FROM_EMAIL as FROM } from '../configs/email.config';
 
 const WORKFLOW_COPY: Record<string, { subject: string; headline: string; body: string }> = {
+  documents_required: {
+    subject: "Action needed — documents required",
+    headline: "Documents required",
+    body: "We need a few documents from you to continue. Please head to your Vault and upload the pending items.",
+  },
+  on_hold: {
+    subject: "Your service has been put on hold",
+    headline: "On hold",
+    body: "Your service has been placed on hold for now. We'll let you know as soon as it resumes — reach out if you have any questions.",
+  },
+  cancelled: {
+    subject: "Your service has been cancelled",
+    headline: "Service cancelled",
+    body: "Your service has been cancelled. If this wasn't expected, please contact us and we'll help sort it out.",
+  },
   documents_received: {
     subject: "Documents received — we're on it",
     headline: "Documents received ✓",
@@ -16,10 +31,10 @@ const WORKFLOW_COPY: Record<string, { subject: string; headline: string; body: s
     headline: "Under review",
     body: "Your service is currently being reviewed by our Taxpert team. We'll be in touch soon.",
   },
-  invoice_pending: {
-    subject: "Invoice pending for your service",
-    headline: "Invoice pending",
-    body: "Your service is ready for the invoice step. Complete payment so we can close it out.",
+  payment: {
+    subject: "Payment due for your service",
+    headline: "Payment due",
+    body: "Your service is ready. Complete the payment so your Taxpert can finalise and close it out.",
   },
   completed: {
     subject: "Service completed — all done!",
@@ -522,6 +537,181 @@ export async function sendTexpertCredentialsEmail({
   });
 }
 
+const ROLE_LABELS: Record<string, string> = {
+  client:      'Client',
+  expert:      'Tax Expert',
+  ca:          'Chartered Accountant',
+  staff:       'Staff',
+  admin:       'Admin',
+  super_admin: 'Super Admin',
+};
+
+export async function sendNewUserWelcomeEmail({
+  to, firstName, email, password, role,
+}: {
+  to: string; firstName: string; email: string; password: string; role: string;
+}) {
+  if (!resend) return;
+  const roleLabel = ROLE_LABELS[role] ?? role;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Welcome to TheTaxpert — your account is ready`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>An administrator has created a <strong>TheTaxpert</strong> account for you. Your role is <strong>${roleLabel}</strong>.</p>
+      <div style="background:#f9f5ec;border:1px dashed #c49a3a;border-radius:10px;padding:20px 24px;margin:20px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Role</p>
+        <p style="margin:0 0 16px;font-weight:700">${roleLabel}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Login Email</p>
+        <p style="margin:0 0 16px;font-weight:700">${email}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Temporary Password</p>
+        <p style="margin:0;font-weight:800;font-size:18px;letter-spacing:.08em;color:#1a1a2e">${password}</p>
+      </div>
+      <p style="color:#b64545;font-size:14px">⚠ Please log in and change your password immediately from your profile settings.</p>
+      ${goldButton(`${BASE_URL}/login`, 'Log In to TheTaxpert')}
+      <p style="font-size:13px;color:#999;margin-top:20px">
+        If you have any questions, contact us at
+        <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.
+      </p>
+    `),
+  });
+}
+
+export async function sendServiceQueuedEmail({
+  to, firstName, serviceName,
+}: {
+  to: string; firstName: string; serviceName: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `We've received your ${serviceName} request`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your <strong>${serviceName}</strong> request has been added to our queue. A Taxpert will be assigned to you shortly and will guide you through every step from there.</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0;font-size:14px;color:#555">In the meantime, you can get a head start by uploading any required documents in your Vault.</p>
+      </div>
+      ${goldButton(`${BASE_URL}/client/services`, 'View My Services')}
+      <p style="font-size:13px;color:#666;margin-top:16px">Questions? Reach us at <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.</p>
+    `),
+  });
+}
+
+export async function sendServiceHoldEmail({
+  to, firstName, serviceName, blocked, reason,
+}: {
+  to: string; firstName: string; serviceName: string; blocked: boolean; reason?: string | null;
+}) {
+  if (!resend) return;
+  if (blocked) {
+    await resend.emails.send({
+      from: FROM, to,
+      subject: `Your service has been paused — ${serviceName}`,
+      html: emailShell(`
+        <p style="font-size:16px">Hi ${firstName},</p>
+        <div style="background:#fff3f3;border-left:3px solid #b64545;padding:12px 16px;border-radius:0 8px 8px 0;margin:0 0 16px">
+          <p style="margin:0;font-weight:700;color:#b64545">⏸ Your service has been temporarily paused</p>
+        </div>
+        <p>Work on your <strong>${serviceName}</strong> service has been paused for now.</p>
+        ${reason ? `<div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0"><p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Reason</p><p style="margin:0;font-weight:600">${reason}</p></div>` : ''}
+        <p style="font-size:14px;color:#555">We'll notify you as soon as it resumes. Questions? Reach us at <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.</p>
+        ${goldButton(`${BASE_URL}/client/services`, 'View My Services')}
+      `),
+    });
+  } else {
+    await resend.emails.send({
+      from: FROM, to,
+      subject: `Your service has resumed — ${serviceName}`,
+      html: emailShell(`
+        <p style="font-size:16px">Hi ${firstName},</p>
+        <div style="background:#f0fdf4;border-left:3px solid #2f7a5b;padding:12px 16px;border-radius:0 8px 8px 0;margin:0 0 16px">
+          <p style="margin:0;font-weight:700;color:#2f7a5b">▶ Your service is active again</p>
+        </div>
+        <p>Good news — your <strong>${serviceName}</strong> service is no longer on hold and our team is back working on it.</p>
+        ${goldButton(`${BASE_URL}/client/services`, 'View My Services')}
+      `),
+    });
+  }
+}
+
+export async function sendPinnedMessageEmail({
+  to, firstName, serviceName, message, clientServiceId,
+}: {
+  to: string; firstName: string; serviceName: string; message: string; clientServiceId: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `A message about your ${serviceName} service`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your team has left you a message regarding your <strong>${serviceName}</strong> service:</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:14px 18px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0;font-size:15px;line-height:1.6;color:#1a1a2e">${message}</p>
+      </div>
+      ${goldButton(`${BASE_URL}/client/services/${clientServiceId}`, 'View Service')}
+      <p style="font-size:13px;color:#666;margin-top:16px">You can reply or ask questions anytime at <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a>.</p>
+    `),
+  });
+}
+
+export async function sendDeletionRequestedEmail({
+  to, texpertFirstName, clientName, clientEmail, serviceName, fiscalYear, clientServiceId,
+}: {
+  to: string;
+  texpertFirstName: string;
+  clientName: string;
+  clientEmail?: string | null;
+  serviceName: string;
+  fiscalYear?: string | null;
+  clientServiceId: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `Deletion requested — ${serviceName}${fiscalYear ? ` (${fiscalYear})` : ''}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${texpertFirstName},</p>
+      <p><strong>${clientName}</strong> has requested to delete a service assigned to you. Please review and either approve (which cancels the service) or reject the request from the service workspace.</p>
+      <div style="background:#fff3f3;border-left:3px solid #b64545;padding:14px 18px;border-radius:0 8px 8px 0;margin:16px 0">
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Service</p>
+        <p style="margin:0 0 12px;font-weight:700">${serviceName}${fiscalYear ? ` &middot; ${fiscalYear}` : ''}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Requested by</p>
+        <p style="margin:0;font-weight:600">${clientName}${clientEmail ? ` &middot; ${clientEmail}` : ''}</p>
+      </div>
+      ${goldButton(`${BASE_URL}/texpert/services/${clientServiceId}`, 'Review Request')}
+      <p style="font-size:13px;color:#666;margin-top:18px">The service stays active until you or an admin approves the request.</p>
+    `),
+  });
+}
+
+export async function sendPasswordResetEmail({
+  to, firstName, newPassword,
+}: {
+  to: string; firstName: string; newPassword: string;
+}) {
+  if (!resend) return;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: 'Your TheTaxpert password has been reset by an admin',
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>An administrator has reset your password on <strong>TheTaxpert</strong>.</p>
+      <div style="background:#f9f5ec;border:1px dashed #c49a3a;border-radius:10px;padding:20px 24px;margin:20px 0">
+        <p style="margin:0 0 6px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Your Temporary Password</p>
+        <p style="margin:0;font-weight:800;font-size:20px;letter-spacing:.08em;color:#1a1a2e">${newPassword}</p>
+      </div>
+      <p style="color:#b64545;font-size:14px">⚠ Please log in immediately and change your password from your profile settings.</p>
+      ${goldButton(`${BASE_URL}/login`, 'Log In to TheTaxpert')}
+      <p style="font-size:13px;color:#999;margin-top:20px">
+        If you did not request this change, please contact us at
+        <a href="mailto:info@thetaxpert.com" style="color:#c49a3a">info@thetaxpert.com</a> immediately.
+      </p>
+    `),
+  });
+}
+
 export async function sendPayoutRecordedEmail({
   to, firstName, serviceName, amountPaise, notes,
 }: {
@@ -570,22 +760,27 @@ export async function sendPaymentConfirmationEmail({
 }) {
   if (!resend) return;
   const rupees = (amountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  const paidOn = new Date().toLocaleString('en-IN', {
+    day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
   await resend.emails.send({
     from: FROM, to,
-    subject: `Payment confirmed — ₹${rupees} for ${serviceName}`,
+    subject: `Payment receipt — ₹${rupees} for ${serviceName}`,
     html: emailShell(`
       <p style="font-size:16px">Hi ${firstName},</p>
-      <p>Your payment has been received. Here's a summary:</p>
+      <p>We've received your payment. This email is your receipt — please keep it for your records.</p>
       <div style="background:#f9f5ec;border-left:3px solid #2f7a5b;padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0">
         <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Service</p>
         <p style="margin:0 0 14px;font-weight:700;font-size:16px">${serviceName}</p>
         <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Amount Paid</p>
         <p style="margin:0 0 14px;font-size:24px;font-weight:800;color:#2f7a5b">₹${rupees}</p>
+        <p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Paid On</p>
+        <p style="margin:0 0 14px;font-weight:600">${paidOn}</p>
         ${invoiceNumber ? `<p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Invoice</p><p style="margin:0 0 14px;font-weight:600">${invoiceNumber}</p>` : ''}
         ${paymentId ? `<p style="margin:0 0 4px;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.05em">Payment ID</p><p style="margin:0;font-size:12px;font-family:monospace;color:#475569">${paymentId}</p>` : ''}
       </div>
-      <p style="font-size:14px;color:#555">Your Taxpert has been notified and will begin working on your service shortly.</p>
-      ${goldButton(`${BASE_URL}/my-services`, 'View My Services')}
+      <p style="font-size:14px;color:#555">Your Taxpert can now finalise and close out your service. You can download a formal receipt anytime from your Payments page.</p>
+      ${goldButton(`${BASE_URL}/client/payments`, 'View Payments &amp; Receipts')}
     `),
   });
 }

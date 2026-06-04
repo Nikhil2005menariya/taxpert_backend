@@ -99,7 +99,7 @@ export const getTaxpertDetail = async (req: Request, res: Response) => {
     const { id } = req.params;
     const service = createServiceClient();
 
-    const [profileRes, servicesRes, payoutsRes] = await Promise.all([
+    const [profileRes, servicesRes] = await Promise.all([
       service.from('users').select('*').eq('id', id).single(),
       // Scalar select only — client_services has multiple FKs to users; FK-hint joins fail
       service
@@ -107,11 +107,6 @@ export const getTaxpertDetail = async (req: Request, res: Response) => {
         .select('id, status, fiscal_year, created_at, user_id, service_id, service:services(name, slug)')
         .eq('assigned_texpert_id', id)
         .order('created_at', { ascending: false }),
-      service
-        .from('texpert_payouts')
-        .select('*')
-        .eq('texpert_id', id)
-        .order('paid_at', { ascending: false }),
     ]);
 
     if (profileRes.error || !profileRes.data) {
@@ -138,7 +133,6 @@ export const getTaxpertDetail = async (req: Request, res: Response) => {
     res.json({
       profile:  profileRes.data,
       services,
-      payouts:  payoutsRes.data ?? [],
     });
   } catch (err) {
     appLogger.error('getTaxpertDetail error', { err });

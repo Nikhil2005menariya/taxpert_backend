@@ -81,6 +81,8 @@ export const webhookHandler = async (req: Request, res: Response) => {
       .maybeSingle();
 
     if (existingCs) {
+      // Mark payment confirmed. Do NOT auto-advance the workflow — the service
+      // stays at its current stage (e.g. 'payment') so a texpert/admin closes it out.
       await supabase
         .from('client_services')
         .update({
@@ -99,7 +101,59 @@ export const webhookHandler = async (req: Request, res: Response) => {
         amount: payment.amount,
         status: 'captured',
         paymentMethod: payment.method,
+        couponId: coupon_id || undefined,
       });
+
+      // Timeline event + confirmation email (non-blocking)
+      void supabase.from('service_events').insert({
+        client_service_id: existingCs.id,
+        actor_user_id:     user_id,
+        event_type:        'payment_received',
+        message:           `Payment of ₹${(payment.amount / 100).toLocaleString('en-IN')} received.`,
+        metadata:          { razorpayPaymentId: payment.id, amount: payment.amount },
+      });
+
+      try {
+        const [{ data: clientUser }, { data: svc }, { data: invoice }] = await Promise.all([
+          supabase.from('users').select('first_name, email').eq('id', user_id).single(),
+          supabase.from('services').select('name').eq('id', existingCs.service_id).single(),
+          supabase.from('invoices').select('invoice_number').eq('client_service_id', existingCs.id).maybeSingle(),
+        ]);
+        if (clientUser?.email) {
+          emailQueue.add('payment-confirmation', {
+            type: 'payment-confirmation',
+            payload: {
+              to:            clientUser.email,
+              firstName:     clientUser.first_name,
+              serviceName:   svc?.name ?? service_slug ?? 'your service',
+              amountPaise:   payment.amount,
+              paymentId:     payment.id,
+              invoiceNumber: invoice?.invoice_number ?? null,
+            },
+          }).catch(console.error);
+        }
+      } catch {}
+
+      writeAudit({
+        actorId:    user_id ?? 'system',
+        action:     'payment_captured',
+        targetType: 'payment',
+        targetId:   payment.id,
+        metadata: {
+          razorpayOrderId: payment.order_id,
+          userId:          user_id,
+          serviceSlug:     service_slug,
+          amountPaise:     payment.amount,
+          couponId:        coupon_id ?? null,
+          clientServiceId: existingCs.id,
+          source:          'main_webhook_existing_cs',
+        },
+      }).catch(console.error);
+
+      if (coupon_id) {
+        consumeCoupon(coupon_id, user_id, payment.id).catch(console.error);
+      }
+
       return res.json({ received: true });
     }
 
