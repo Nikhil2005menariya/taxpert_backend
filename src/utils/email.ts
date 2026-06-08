@@ -513,6 +513,75 @@ export async function sendAdditionalDocAddedEmail({
   });
 }
 
+// Bundled document update — one email summarising a batch admin action so the
+// client receives a single notification instead of one per document.
+export async function sendDocumentBatchUpdateEmail({
+  to, firstName, serviceName, action, docNames, note,
+}: {
+  to: string; firstName: string; serviceName: string;
+  action: 'approve' | 'reject' | 'reupload' | 'added';
+  docNames: string[]; note?: string | null;
+}) {
+  if (!resend) return;
+  const n = docNames.length;
+  const plural = n !== 1;
+  const list = `<ul style="margin:12px 0;padding-left:20px">${docNames.map(d => `<li style="margin:4px 0"><strong>${d}</strong></li>`).join('')}</ul>`;
+
+  let subject: string;
+  let heading: string;
+  let cta = '';
+  if (action === 'approve') {
+    subject = `${n} document${plural ? 's' : ''} approved — ${serviceName}`;
+    heading = `<p>Good news! The following document${plural ? 's have' : ' has'} been <strong style="color:#2f7a5b">approved</strong> for <strong>${serviceName}</strong>:</p>`;
+  } else if (action === 'reject') {
+    subject = `${n} document${plural ? 's' : ''} rejected — ${serviceName}`;
+    heading = `<p>The following document${plural ? 's were' : ' was'} <strong style="color:#b64545">rejected</strong> for <strong>${serviceName}</strong>:</p>`;
+    cta = goldButton(`${BASE_URL}/dashboard/vault`, 'Go to Vault');
+  } else if (action === 'reupload') {
+    subject = `Action required: re-upload ${n} document${plural ? 's' : ''} — ${serviceName}`;
+    heading = `<p>Your Taxpert has requested a re-upload of the following document${plural ? 's' : ''} for <strong>${serviceName}</strong>:</p>`;
+    cta = goldButton(`${BASE_URL}/dashboard/vault`, 'Go to Vault');
+  } else {
+    subject = `${n} new document${plural ? 's' : ''} requested — ${serviceName}`;
+    heading = `<p>Your Taxpert has added ${n} new document slot${plural ? 's' : ''} to your <strong>${serviceName}</strong> service:</p>`;
+    cta = goldButton(`${BASE_URL}/dashboard/vault`, 'Upload Now');
+  }
+
+  await resend.emails.send({
+    from: FROM, to, subject,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      ${heading}
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:8px 16px;border-radius:0 8px 8px 0;margin:16px 0">${list}</div>
+      ${note ? `<p style="background:#f5f5f0;padding:12px 16px;border-radius:8px;font-size:14px">Note from your Taxpert: ${note}</p>` : ''}
+      ${cta}
+    `),
+  });
+}
+
+// Output documents uploaded by the Taxpert — one email for the whole batch.
+export async function sendOutputDocsAddedEmail({
+  to, firstName, serviceName, docNames,
+}: {
+  to: string; firstName: string; serviceName: string; docNames: string[];
+}) {
+  if (!resend) return;
+  const n = docNames.length;
+  const plural = n !== 1;
+  const list = `<ul style="margin:12px 0;padding-left:20px">${docNames.map(d => `<li style="margin:4px 0"><strong>${d}</strong></li>`).join('')}</ul>`;
+  await resend.emails.send({
+    from: FROM, to,
+    subject: `${n} document${plural ? 's' : ''} ready — ${serviceName}`,
+    html: emailShell(`
+      <p style="font-size:16px">Hi ${firstName},</p>
+      <p>Your Taxpert has uploaded ${n} document${plural ? 's' : ''} for <strong>${serviceName}</strong>:</p>
+      <div style="background:#f9f5ec;border-left:3px solid #c49a3a;padding:8px 16px;border-radius:0 8px 8px 0;margin:16px 0">${list}</div>
+      <p>You can view and download ${plural ? 'them' : 'it'} from your service workspace.</p>
+      ${goldButton(`${BASE_URL}/my-services`, 'View Documents')}
+    `),
+  });
+}
+
 export async function sendTexpertCredentialsEmail({
   to, firstName, email, password,
 }: {

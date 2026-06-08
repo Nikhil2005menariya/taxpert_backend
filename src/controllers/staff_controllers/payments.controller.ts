@@ -131,7 +131,7 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
     // Use service client for all DB ops — avoids RLS blocking invoice creation or RPC calls
     const { data: settings } = await sc
       .from('invoice_settings')
-      .select('invoice_prefix')
+      .select('invoice_prefix, gst_enabled, gst_rate')
       .limit(1)
       .maybeSingle();
 
@@ -140,6 +140,12 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
     const invoiceNumber = invoiceNum ?? `${prefix}-${Date.now()}`;
 
     const dueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    // GST is additive: catalogue price is the base, GST is charged on top.
+    const gstEnabled = settings?.gst_enabled === true;
+    const gstRate    = Number(settings?.gst_rate ?? 18);
+    const gstAmount  = gstEnabled ? Math.round((price * gstRate) / 100) : 0;
+    const totalAmount = price + gstAmount;
 
     const { data: invoice, error: createErr } = await sc
       .from('invoices')
@@ -150,7 +156,9 @@ export const getOrCreateInvoice = async (req: Request, res: Response) => {
         service_id:        svc?.id ?? cs.service_id,
         status:            'pending',
         subtotal:          price,
-        total_amount:      price,
+        total_amount:      totalAmount,
+        gst_amount:        gstEnabled ? gstAmount : null,
+        gst_percent:       gstEnabled ? gstRate : null,
         issued_at:         new Date().toISOString(),
         due_date:          dueDate,
       })
@@ -241,7 +249,7 @@ export const getInvoiceSettings = async (req: Request, res: Response) => {
     const sc = createServiceClient();
     const { data, error } = await sc
       .from('invoice_settings')
-      .select('business_name, support_email, support_phone, website, pan, invoice_prefix, bank_name, account_holder_name, account_number, ifsc, upi_id, default_terms, payment_instructions, logo_url')
+      .select('business_name, support_email, support_phone, website, pan, invoice_prefix, bank_name, account_holder_name, account_number, ifsc, upi_id, default_terms, payment_instructions, logo_url, gst_enabled, gst_rate')
       .eq('id', '00000000-0000-0000-0000-000000000001')
       .single();
 

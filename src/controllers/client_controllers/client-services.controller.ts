@@ -8,7 +8,7 @@ import { appLogger } from '../../utils/logger';
 import { notifyTexpertForService, notifyAdmins } from '../../utils/notifications';
 
 const SERVICE_SELECT = `
-  id, user_id, service_id, status, payment_status, payment_id,
+  id, user_id, service_id, status, payment_status, payment_id, fiscal_year,
   razorpay_order_id, notes, assigned_to, assigned_by, status_updated_at, created_at, updated_at,
   service:services(id, name, category, slug),
   client_documents(id, template_id, document_name, status, file_path, uploaded_at)
@@ -22,13 +22,50 @@ export const getClientServices = async (req: Request, res: Response) => {
     const role = profile?.role as UserRole;
 
     if (!isStaffRole(role)) {
-      const { data, error } = await req.supabase
+      // Search (service name/category), fiscal-year filter, and pagination — all
+      // server-side so the client's "My Services" page scales.
+      const rawQ     = String(req.query.search ?? '').trim();
+      const safeQ    = rawQ.replace(/[,()*%]/g, ' ').trim(); // keep PostgREST .or() syntax safe
+      const fy       = String(req.query.fy ?? '').trim();
+      const page     = Math.max(1, parseInt(String(req.query.page ?? '1'), 10) || 1);
+      const pageSize = Math.min(48, Math.max(1, parseInt(String(req.query.pageSize ?? '9'), 10) || 9));
+      const from     = (page - 1) * pageSize;
+      const to       = from + pageSize - 1;
+
+      // Distinct fiscal years across ALL the user's services (for the filter dropdown)
+      const { data: fyRows } = await req.supabase
         .from('client_services')
-        .select(SERVICE_SELECT)
-        .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false });
+        .select('fiscal_year')
+        .eq('user_id', req.user.id);
+      const fiscalYears = Array.from(new Set((fyRows ?? []).map((r: any) => r.fiscal_year).filter(Boolean)))
+        .sort()
+        .reverse();
+
+      // Resolve service ids matching the search term (name or category)
+      let matchedServiceIds: string[] | null = null;
+      if (safeQ) {
+        const { data: svcMatches } = await req.supabase
+          .from('services')
+          .select('id')
+          .or(`name.ilike.%${safeQ}%,category.ilike.%${safeQ}%`);
+        matchedServiceIds = (svcMatches ?? []).map((s: any) => s.id);
+        if (matchedServiceIds.length === 0) {
+          return res.json({ data: [], total: 0, page, pageSize, fiscalYears });
+        }
+      }
+
+      let query = req.supabase
+        .from('client_services')
+        .select(SERVICE_SELECT, { count: 'exact' })
+        .eq('user_id', req.user.id);
+      if (fy) query = query.eq('fiscal_year', fy);
+      if (matchedServiceIds) query = query.in('service_id', matchedServiceIds);
+
+      const { data, error, count } = await query
+        .order('created_at', { ascending: false })
+        .range(from, to);
       if (error) return res.status(400).json({ error: error.message });
-      return res.json({ data });
+      return res.json({ data, total: count ?? 0, page, pageSize, fiscalYears });
     }
 
     if (isAdminRole(role)) {
@@ -60,6 +97,58 @@ export const getClientServices = async (req: Request, res: Response) => {
     res.json({ data: merged });
   } catch (error) {
     console.error('getClientServices error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── "Mark done" for computed due dates ────────────────────────
+// Due dates are generated client-side; a client can dismiss an occurrence by its
+// stable key so it stops rendering and no longer counts as overdue.
+export const getDoneDueDates = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const { data, error } = await req.supabase
+      .from('client_due_date_done')
+      .select('due_key')
+      .eq('user_id', req.user.id);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ data: (data ?? []).map((r: any) => r.due_key) });
+  } catch (error) {
+    console.error('getDoneDueDates error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const markDueDateDone = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const dueKey = String(req.body?.dueKey ?? '').trim();
+    if (!dueKey) return res.status(400).json({ error: 'dueKey is required' });
+    const { error } = await req.supabase
+      .from('client_due_date_done')
+      .upsert({ user_id: req.user.id, due_key: dueKey }, { onConflict: 'user_id,due_key', ignoreDuplicates: true });
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('markDueDateDone error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const unmarkDueDateDone = async (req: Request, res: Response) => {
+  try {
+    if (!req.user || !req.supabase) return res.status(401).json({ error: 'Unauthorized' });
+    const dueKey = String(req.body?.dueKey ?? '').trim();
+    if (!dueKey) return res.status(400).json({ error: 'dueKey is required' });
+    const { error } = await req.supabase
+      .from('client_due_date_done')
+      .delete()
+      .eq('user_id', req.user.id)
+      .eq('due_key', dueKey);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('unmarkDueDateDone error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

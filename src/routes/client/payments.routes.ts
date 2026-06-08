@@ -4,6 +4,7 @@ import {
   getPendingClientInvoices,
   getMyPayments,
   createOrder,
+  getCombinedInvoice,
 } from '../../controllers/client_controllers/payments.controller';
 import {
   getOrCreateInvoice,
@@ -17,6 +18,7 @@ router.use(authMiddleware);
 router.get('/my-payments',                getMyPayments);
 router.get('/pending-invoices',           getPendingClientInvoices);
 router.post('/create-order',              createOrder);
+router.post('/combined-invoice',          getCombinedInvoice);
 
 // Invoice settings — any authenticated user can read (used on the invoice page)
 router.get('/invoice-settings',           getInvoiceSettings);

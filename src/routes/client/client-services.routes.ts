@@ -1,12 +1,15 @@
 import { Router } from 'express';
 import { 
-  getClientServices, 
-  getDashboardSummary, 
-  getDueDateServices, 
-  getClientServiceById, 
-  removeServiceDirect, 
-  requestServiceDeletion, 
-  cancelDeletionRequest 
+  getClientServices,
+  getDashboardSummary,
+  getDueDateServices,
+  getClientServiceById,
+  removeServiceDirect,
+  requestServiceDeletion,
+  cancelDeletionRequest,
+  getDoneDueDates,
+  markDueDateDone,
+  unmarkDueDateDone
 } from '../../controllers/client_controllers/client-services.controller';
 import { 
   getOpsServices, 
@@ -32,6 +35,10 @@ router.get('/unassigned', getUnassignedServices);
 // Client dashboard routes
 router.get('/dashboard', getDashboardSummary);
 router.get('/due-dates', getDueDateServices);
+// Due-date "mark done" (more specific than '/:id', registered before it)
+router.get('/due-dates/done', getDoneDueDates);
+router.post('/due-dates/done', markDueDateDone);
+router.post('/due-dates/undone', unmarkDueDateDone);
 
 // Base route for getting all own/assigned services
 router.get('/', getClientServices);

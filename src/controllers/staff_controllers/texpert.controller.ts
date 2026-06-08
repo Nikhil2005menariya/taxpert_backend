@@ -433,6 +433,182 @@ export const addDocSlot = async (req: Request, res: Response) => {
   }
 };
 
+// ── Bulk document actions ─────────────────────────────────────
+// Approve / reject / request-reupload many docs at once. Emits ONE timeline
+// event, ONE bundled email and ONE in-app notification so the client isn't
+// flooded with one alert per document.
+export const batchUpdateDocs = async (req: Request, res: Response) => {
+  try {
+    if (!await assertTexpert(req, res)) return;
+    const { id } = req.params;
+    const { action, docIds, note } = req.body;
+
+    if (!['approve', 'reject', 'reupload'].includes(action)) {
+      return res.status(400).json({ error: 'action must be approve, reject, or reupload' });
+    }
+    if (!Array.isArray(docIds) || docIds.length === 0) {
+      return res.status(400).json({ error: 'docIds must be a non-empty array' });
+    }
+    if (action === 'reject' && !String(note ?? '').trim()) {
+      return res.status(400).json({ error: 'A reason is required to reject documents' });
+    }
+
+    const service = createServiceClient();
+    const { data: cs } = await service
+      .from('client_services')
+      .select('user_id, service_id, assigned_texpert_id')
+      .eq('id', id)
+      .single();
+    if (!cs) return res.status(404).json({ error: 'Service not found' });
+    if (cs.assigned_texpert_id !== req.user!.id) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    const { data: docsToUpdate } = await service
+      .from('client_documents')
+      .select('id, document_name')
+      .eq('client_service_id', id)
+      .in('id', docIds);
+    if (!docsToUpdate || docsToUpdate.length === 0) {
+      return res.status(404).json({ error: 'No matching documents found' });
+    }
+
+    const now = new Date().toISOString();
+    let updatePayload: Record<string, unknown>;
+    let eventType: string;
+    if (action === 'approve') {
+      updatePayload = { status: 'approved', reupload_requested: false, verified_at: now, verified_by: req.user!.id };
+      eventType = 'document_approved';
+    } else if (action === 'reject') {
+      updatePayload = { status: 'rejected', reupload_requested: false, reupload_note: String(note).trim(), verified_at: now, verified_by: req.user!.id };
+      eventType = 'document_rejected';
+    } else {
+      updatePayload = { reupload_requested: true, reupload_requested_at: now, reupload_requested_by: req.user!.id, reupload_note: note ?? null };
+      eventType = 'document_reupload_requested';
+    }
+
+    const ids   = docsToUpdate.map(d => d.id);
+    const names = docsToUpdate.map(d => d.document_name);
+    const n     = names.length;
+    const plural = n !== 1;
+
+    const { error } = await service.from('client_documents').update(updatePayload).in('id', ids);
+    if (error) return res.status(400).json({ error: error.message });
+
+    const verb = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 're-upload requested';
+    await service.from('service_events').insert({
+      client_service_id: id,
+      event_type:        eventType,
+      actor_user_id:     req.user!.id,
+      message:           `${n} document${plural ? 's' : ''} ${verb}: ${names.join(', ')}`,
+      metadata:          { documentIds: ids, action, note: note ?? null, batch: true, count: n },
+    });
+
+    await writeAudit({
+      actorId:    req.user!.id,
+      action:     `batch_${action}_documents`,
+      targetType: 'client_service',
+      targetId:   id,
+      metadata:   { documentIds: ids, count: n },
+    });
+
+    try {
+      const [{ data: client }, { data: svc }] = await Promise.all([
+        service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+        service.from('services').select('name').eq('id', cs.service_id).single(),
+      ]);
+      const serviceName = svc?.name ?? 'your service';
+      if (client?.email) {
+        emailQueue.add('document-batch-update', {
+          type: 'document-batch-update',
+          payload: { to: client.email, firstName: client.first_name, serviceName, action, docNames: names, note: note ?? null },
+        }).catch(e => appLogger.warn('batch doc email enqueue failed', { err: e.message }));
+      }
+      const title =
+        action === 'approve'  ? `${n} document${plural ? 's' : ''} approved · ${serviceName}`
+        : action === 'reject' ? `${n} document${plural ? 's' : ''} rejected · ${serviceName}`
+        :                       `Re-upload requested for ${n} document${plural ? 's' : ''} · ${serviceName}`;
+      const body =
+        action === 'approve'  ? names.join(', ')
+        : action === 'reject' ? `${names.join(', ')}${note ? ` — ${note}` : ''}`
+        :                       `Please re-upload: ${names.join(', ')}${note ? ` — ${note}` : ''}`;
+      const notifType = action === 'approve' ? 'document_approved' : action === 'reject' ? 'document_rejected' : 'document_reupload';
+      void notifyClientForService(cs.user_id, id, { type: notifType, title, body });
+    } catch (e) {
+      appLogger.warn('batchUpdateDocs email lookup failed', { err: (e as Error).message });
+    }
+
+    res.json({ success: true, updated: ids.length });
+  } catch (err) {
+    appLogger.error('batchUpdateDocs error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const batchAddDocSlots = async (req: Request, res: Response) => {
+  try {
+    if (!await assertTexpert(req, res)) return;
+    const { id } = req.params;
+    const names: string[] = Array.isArray(req.body?.documentNames)
+      ? req.body.documentNames.map((s: unknown) => String(s).trim()).filter(Boolean)
+      : [];
+    if (names.length === 0) return res.status(400).json({ error: 'documentNames must be a non-empty array' });
+
+    const service = createServiceClient();
+    const { data: cs } = await service
+      .from('client_services')
+      .select('user_id, service_id, assigned_texpert_id')
+      .eq('id', id)
+      .single();
+    if (!cs) return res.status(404).json({ error: 'Service not found' });
+    if (cs.assigned_texpert_id !== req.user!.id) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    const { data, error } = await service
+      .from('client_documents')
+      .insert(names.map(name => ({ client_service_id: id, document_name: name, status: 'pending', template_id: null })))
+      .select('id');
+    if (error) return res.status(400).json({ error: error.message });
+
+    const n = names.length;
+    const plural = n !== 1;
+    await service.from('service_events').insert({
+      client_service_id: id,
+      event_type:        'optional_document_added',
+      actor_user_id:     req.user!.id,
+      message:           `${n} document slot${plural ? 's' : ''} added: ${names.join(', ')}`,
+      metadata:          { docIds: (data ?? []).map((d: any) => d.id), batch: true, count: n },
+    });
+
+    try {
+      const [{ data: client }, { data: svc }] = await Promise.all([
+        service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+        service.from('services').select('name').eq('id', cs.service_id).single(),
+      ]);
+      const serviceName = svc?.name ?? 'your service';
+      if (client?.email) {
+        emailQueue.add('document-batch-update', {
+          type: 'document-batch-update',
+          payload: { to: client.email, firstName: client.first_name, serviceName, action: 'added', docNames: names, note: null },
+        }).catch(e => appLogger.warn('batch addDocSlot email enqueue failed', { err: e.message }));
+      }
+      void notifyClientForService(cs.user_id, id, {
+        type: 'document_added',
+        title: `${n} new document${plural ? 's' : ''} requested · ${serviceName}`,
+        body: `Please upload: ${names.join(', ')}`,
+      });
+    } catch (e) {
+      appLogger.warn('batchAddDocSlots email lookup failed', { err: (e as Error).message });
+    }
+
+    res.status(201).json({ data });
+  } catch (err) {
+    appLogger.error('batchAddDocSlots error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 export const getOpenQueue = async (req: Request, res: Response) => {
   try {
     if (!await assertTexpert(req, res)) return;

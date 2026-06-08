@@ -17,7 +17,7 @@ export const getVaultGroups = async (req: Request, res: Response) => {
     let query = req.supabase
       .from('client_services')
       .select(`
-        id, user_id, status, created_at,
+        id, user_id, status, created_at, fiscal_year,
         service:services(id, name, category, slug),
         client_documents(id, status)
       `)
@@ -36,7 +36,9 @@ export const getVaultGroups = async (req: Request, res: Response) => {
       const svc = Array.isArray(cs.service) ? cs.service[0] : cs.service;
       if (!svc) continue;
       const docs = (cs.client_documents ?? []) as any[];
-      const fy = getFYFromDate(cs.created_at);
+      // Prefer the service's stored fiscal year (Indian FY, April–March, set at
+      // creation); fall back to deriving it from created_at for legacy rows.
+      const fy = cs.fiscal_year ?? getFYFromDate(cs.created_at);
 
       const item = {
         clientServiceId: cs.id,
@@ -79,7 +81,7 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
       req.supabase
         .from('client_services')
         .select(`
-          id, user_id, status, created_at,
+          id, user_id, status, created_at, fiscal_year,
           service:services(
             id, name, slug,
             document_templates(id, name, description, required, sort_order)
@@ -157,7 +159,7 @@ export const getVaultServiceDetail = async (req: Request, res: Response) => {
         clientServiceId: cs.id,
         userId: cs.user_id,
         status: cs.status,
-        fy: getFYFromDate(cs.created_at),
+        fy: (cs as any).fiscal_year ?? getFYFromDate(cs.created_at),
         serviceName: svc?.name ?? 'Unknown',
         serviceSlug: svc?.slug ?? '',
         documents: docs,

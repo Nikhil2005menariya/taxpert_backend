@@ -22,6 +22,7 @@ import {
   listClientServices,
   listClients, getClientDetail, getClientServices,
   getAdminServiceDetail, adminUpdateService, adminUpdateDocStatus,
+  adminBatchUpdateDocStatus, adminBatchAddDocSlots,
   adminAddTask, adminUpdateTask, adminDeleteTask,
   adminLogEvent, adminAddDocSlot,
 } from '../../controllers/admin_controllers/clients.controller';
@@ -76,6 +77,10 @@ router.get('/clients/:id/services',                       getClientServices);
 // Service detail (full) — accessible by clientServiceId directly
 router.get('/client-services/:id',                        getAdminServiceDetail);
 router.patch('/client-services/:id',                      adminUpdateService);
+// Batch routes MUST precede the single-:docId route so '/docs/batch' isn't
+// swallowed by ':docId'.
+router.patch('/client-services/:id/docs/batch',           adminBatchUpdateDocStatus);
+router.post('/client-services/:id/docs/batch',            adminBatchAddDocSlots);
 router.patch('/client-services/:id/docs/:docId',          adminUpdateDocStatus);
 router.post('/client-services/:id/tasks',                  adminAddTask);
 router.patch('/client-services/:id/tasks/:taskId',         adminUpdateTask);

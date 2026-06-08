@@ -11,6 +11,8 @@ import {
   sendTexpertAssignedEmail,
   sendReuploadRequestEmail,
   sendAdditionalDocAddedEmail,
+  sendDocumentBatchUpdateEmail,
+  sendOutputDocsAddedEmail,
   sendTexpertCredentialsEmail,
   sendPayoutRecordedEmail,
   sendManualNotificationEmail,
@@ -63,6 +65,12 @@ export const emailWorker = new Worker('email', async (job: Job) => {
       break;
     case 'additional-doc-added':
       await sendAdditionalDocAddedEmail(payload);
+      break;
+    case 'document-batch-update':
+      await sendDocumentBatchUpdateEmail(payload);
+      break;
+    case 'output-docs-added':
+      await sendOutputDocsAddedEmail(payload);
       break;
     case 'texpert-credentials':
       await sendTexpertCredentialsEmail(payload);

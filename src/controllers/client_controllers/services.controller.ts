@@ -13,19 +13,25 @@ export const checkServiceExists = async (req: Request, res: Response) => {
 
     const { data: service } = await req.supabase
       .from('services')
-      .select('id')
+      .select('id, requires_fy')
       .eq('slug', slug)
       .eq('is_active', true)
       .single();
 
     if (!service) return res.json({ exists: false, clientServiceId: null });
 
-    const { data: cs } = await req.supabase
+    // Match the assign rule: FY-bound services only "exist" within the current FY.
+    let q = req.supabase
       .from('client_services')
       .select('id')
       .eq('user_id', req.user.id)
       .eq('service_id', service.id)
-      .neq('status', 'cancelled')
+      .neq('status', 'cancelled');
+    if (service.requires_fy !== false) q = q.eq('fiscal_year', currentFY());
+
+    const { data: cs } = await q
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     res.json({ exists: !!cs, clientServiceId: cs?.id ?? null });
@@ -51,18 +57,27 @@ export const assignService = async (req: Request, res: Response) => {
 
     if (svcErr || !service) return res.status(404).json({ error: 'Service not found' });
 
-    const { data: existing } = await req.supabase
+    // FY-bound services (most filings) can be re-taken in a new financial year —
+    // only block a duplicate within the SAME fiscal year. Non-FY services (e.g.
+    // one-time incorporations) stay a single workspace regardless of year.
+    const fiscalYear = service.requires_fy !== false ? currentFY() : null;
+
+    let dupQuery = req.supabase
       .from('client_services')
       .select('id')
       .eq('user_id', req.user.id)
       .eq('service_id', service.id)
-      .neq('status', 'cancelled')
+      .neq('status', 'cancelled');
+    if (fiscalYear) dupQuery = dupQuery.eq('fiscal_year', fiscalYear);
+
+    const { data: existing } = await dupQuery
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     if (existing) return res.json({ data: existing, alreadyExists: true });
 
     const now = new Date().toISOString();
-    const fiscalYear = service.requires_fy !== false ? currentFY() : null;
 
     const { data: cs, error: csErr } = await req.supabase
       .from('client_services')

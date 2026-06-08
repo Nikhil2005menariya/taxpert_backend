@@ -750,3 +750,174 @@ export const adminUpdateDocStatus = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+// Bulk approve / reject / request-reupload for several documents at once.
+// Emits a SINGLE timeline event, a SINGLE bundled email, and a SINGLE in-app
+// notification — so the client isn't flooded with one alert per document.
+export const adminBatchUpdateDocStatus = async (req: Request, res: Response) => {
+  try {
+    if (!await assertAdmin(req, res)) return;
+    const { id } = req.params;
+    const { action, docIds, note } = req.body;
+
+    if (!['approve', 'reject', 'reupload'].includes(action)) {
+      return res.status(400).json({ error: 'action must be approve, reject, or reupload' });
+    }
+    if (!Array.isArray(docIds) || docIds.length === 0) {
+      return res.status(400).json({ error: 'docIds must be a non-empty array' });
+    }
+
+    const service = createServiceClient();
+
+    // Only documents that actually belong to this service.
+    const { data: docsToUpdate } = await service
+      .from('client_documents')
+      .select('id, document_name')
+      .eq('client_service_id', id)
+      .in('id', docIds);
+
+    if (!docsToUpdate || docsToUpdate.length === 0) {
+      return res.status(404).json({ error: 'No matching documents found' });
+    }
+
+    let updatePayload: Record<string, unknown>;
+    let eventType: string;
+    if (action === 'approve') {
+      updatePayload = { status: 'approved', reupload_requested: false };
+      eventType = 'document_approved';
+    } else if (action === 'reject') {
+      updatePayload = { status: 'rejected', reupload_requested: false };
+      eventType = 'document_rejected';
+    } else {
+      updatePayload = {
+        reupload_requested:    true,
+        reupload_requested_at: new Date().toISOString(),
+        reupload_requested_by: req.user!.id,
+        reupload_note:         note ?? null,
+      };
+      eventType = 'document_reupload_requested';
+    }
+
+    const ids   = docsToUpdate.map(d => d.id);
+    const names = docsToUpdate.map(d => d.document_name);
+    const n     = names.length;
+    const plural = n !== 1;
+
+    const { error } = await service.from('client_documents').update(updatePayload).in('id', ids);
+    if (error) return res.status(400).json({ error: error.message });
+
+    const verb = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 're-upload requested';
+
+    // ONE timeline event for the whole batch
+    await service.from('service_events').insert({
+      client_service_id: id,
+      event_type:        eventType,
+      actor_user_id:     req.user!.id,
+      message:           `${n} document${plural ? 's' : ''} ${verb}: ${names.join(', ')}`,
+      metadata:          { documentIds: ids, action, note: note ?? null, batch: true, count: n },
+    });
+
+    // ONE bundled email + ONE bundled in-app notification
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('user_id, service_id')
+        .eq('id', id)
+        .single();
+      if (cs) {
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+          service.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        const serviceName = svc?.name ?? 'your service';
+        if (client?.email) {
+          enqueueEmail('document-batch-update', {
+            to: client.email, firstName: client.first_name, serviceName,
+            action, docNames: names, note: note ?? null,
+          });
+        }
+        const title =
+          action === 'approve'  ? `${n} document${plural ? 's' : ''} approved · ${serviceName}`
+          : action === 'reject' ? `${n} document${plural ? 's' : ''} rejected · ${serviceName}`
+          :                       `Re-upload requested for ${n} document${plural ? 's' : ''} · ${serviceName}`;
+        const body =
+          action === 'approve'  ? names.join(', ')
+          : action === 'reject' ? `${names.join(', ')}${note ? ` — ${note}` : ''}`
+          :                       `Please re-upload: ${names.join(', ')}${note ? ` — ${note}` : ''}`;
+        const notifType = action === 'approve' ? 'document_approved' : action === 'reject' ? 'document_rejected' : 'document_reupload';
+        void notifyClientForService(cs.user_id, id, { type: notifType, title, body });
+      }
+    } catch (e) {
+      appLogger.warn('adminBatchUpdateDocStatus email lookup failed', { err: (e as Error).message });
+    }
+
+    res.json({ success: true, updated: ids.length });
+  } catch (err) {
+    appLogger.error('adminBatchUpdateDocStatus error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// Add several document slots at once — SINGLE timeline event + email + notification.
+export const adminBatchAddDocSlots = async (req: Request, res: Response) => {
+  try {
+    if (!await assertAdmin(req, res)) return;
+    const { id } = req.params;
+    const names: string[] = Array.isArray(req.body?.document_names)
+      ? req.body.document_names.map((s: unknown) => String(s).trim()).filter(Boolean)
+      : [];
+    if (names.length === 0) return res.status(400).json({ error: 'document_names must be a non-empty array' });
+
+    const service = createServiceClient();
+    const { data, error } = await service
+      .from('client_documents')
+      .insert(names.map(name => ({ client_service_id: id, document_name: name, status: 'pending' })))
+      .select();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const n = names.length;
+    const plural = n !== 1;
+
+    await service.from('service_events').insert({
+      client_service_id: id,
+      event_type:        'optional_document_added',
+      actor_user_id:     req.user!.id,
+      message:           `${n} document slot${plural ? 's' : ''} added: ${names.join(', ')}`,
+      metadata:          { docIds: (data ?? []).map((d: any) => d.id), batch: true, count: n },
+    });
+
+    try {
+      const { data: cs } = await service
+        .from('client_services')
+        .select('user_id, service_id')
+        .eq('id', id)
+        .single();
+      if (cs) {
+        const [{ data: client }, { data: svc }] = await Promise.all([
+          service.from('users').select('email, first_name').eq('id', cs.user_id).single(),
+          service.from('services').select('name').eq('id', cs.service_id).single(),
+        ]);
+        const serviceName = svc?.name ?? 'your service';
+        if (client?.email) {
+          enqueueEmail('document-batch-update', {
+            to: client.email, firstName: client.first_name, serviceName,
+            action: 'added', docNames: names, note: null,
+          });
+        }
+        void notifyClientForService(cs.user_id, id, {
+          type: 'document_added',
+          title: `${n} new document${plural ? 's' : ''} requested · ${serviceName}`,
+          body: `Please upload: ${names.join(', ')}`,
+        });
+      }
+    } catch (e) {
+      appLogger.warn('adminBatchAddDocSlots email lookup failed', { err: (e as Error).message });
+    }
+
+    res.status(201).json({ data });
+  } catch (err) {
+    appLogger.error('adminBatchAddDocSlots error', { err });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
